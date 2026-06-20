@@ -25,16 +25,377 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
 from .base import IsaacAdapterBase
+
+if TYPE_CHECKING:
+    from pxr import Usd
 
 
 class IsaacAdapterV6(IsaacAdapterBase):
-    """Adapter for Isaac Sim 6.0.0 — backend-neutral (PhysX + Newton).
-
-    Built entirely on isaacsim.core.experimental.* + SimulationManager
-    + isaacsim.sensors.experimental.rtx + isaacsim.asset.importer.urdf.
-    Subsequent tasks fill in concrete method implementations.
-    """
+    """Adapter for Isaac Sim 6.0.0 — backend-neutral (PhysX + Newton)."""
 
     def __init__(self) -> None:
         super().__init__()
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            self._engine = SimulationManager.get_active_physics_engine()
+        except Exception:
+            self._engine = "unknown"
+        try:
+            from isaacsim.core.version import get_version
+
+            self._isaacsim_version = str(get_version())
+        except Exception:
+            self._isaacsim_version = "unknown"
+
+    # ── Scene ──────────────────────────────────────────────
+
+    def get_stage(self) -> "Usd.Stage":
+        import omni.usd
+
+        return omni.usd.get_context().get_stage()
+
+    def get_assets_root_path(self) -> str:
+        from isaacsim.storage.native import get_assets_root_path
+
+        return get_assets_root_path()
+
+    def discover_environments(self) -> Dict[str, Dict[str, str]]:
+        # Identical to V5 — uses omni.client, no Isaac Sim physics deps.
+        import omni.client
+        from isaacsim.storage.native import get_assets_root_path
+
+        root = get_assets_root_path()
+        discovered: Dict[str, Dict[str, str]] = {}
+        search_bases = ["/Isaac/Environments/", "/NVIDIA/Assets/Scenes/Templates/"]
+        for base in search_bases:
+            result, entries = omni.client.list(root + base)
+            if result != omni.client.Result.OK:
+                continue
+            for entry in entries:
+                name = entry.relative_path.rstrip("/")
+                dir_path = root + base + name + "/"
+                r2, files = omni.client.list(dir_path)
+                if r2 != omni.client.Result.OK:
+                    continue
+                for f in files:
+                    if f.relative_path.endswith(".usd") or f.relative_path.endswith(".usda"):
+                        key = name.lower().replace(" ", "_")
+                        if key not in discovered:
+                            discovered[key] = {
+                                "asset_path": base + name + "/" + f.relative_path,
+                                "description": name.replace("_", " "),
+                            }
+                        break
+                for f in files:
+                    subname = f.relative_path.rstrip("/")
+                    r3, subfiles = omni.client.list(dir_path + subname + "/")
+                    if r3 != omni.client.Result.OK:
+                        continue
+                    for sf in subfiles:
+                        if sf.relative_path.endswith(".usd") or sf.relative_path.endswith(".usda"):
+                            key = f"{name}_{subname}".lower().replace(" ", "_")
+                            if key not in discovered:
+                                discovered[key] = {
+                                    "asset_path": base + name + "/" + subname + "/" + sf.relative_path,
+                                    "description": f"{name} {subname}".replace("_", " "),
+                                }
+                            break
+        return discovered
+
+    def load_environment(self, env_path: str, prim_path: str = "/Environment") -> None:
+        from isaacsim.core.experimental.utils.stage import add_reference_to_stage
+
+        add_reference_to_stage(env_path, prim_path)
+
+    # ── Prims ──────────────────────────────────────────────
+
+    def create_prim(self, prim_path: str, prim_type: str = "Xform", **kwargs) -> "Usd.Prim":
+        from isaacsim.core.experimental.utils.stage import define_prim
+
+        return define_prim(prim_path, type_name=prim_type)
+
+    def delete_prim(self, prim_path: str) -> bool:
+        import omni.kit.commands
+
+        omni.kit.commands.execute("DeletePrims", paths=[prim_path])
+        return True
+
+    def add_reference_to_stage(self, usd_path: str, prim_path: str) -> "Usd.Prim":
+        from isaacsim.core.experimental.utils.stage import add_reference_to_stage
+
+        return add_reference_to_stage(usd_path, prim_path)
+
+    def set_prim_transform(
+        self,
+        prim_path: str,
+        position: Optional[Sequence[float]] = None,
+        rotation: Optional[Sequence[float]] = None,
+        scale: Optional[Sequence[float]] = None,
+    ) -> None:
+        from pxr import Gf, UsdGeom
+
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        if position is not None:
+            xformable.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*position))
+        if rotation is not None:
+            xformable.AddRotateXYZOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*rotation))
+        if scale is not None:
+            xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*scale))
+
+    def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
+        from pxr import UsdGeom
+
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        xformable = UsdGeom.Xformable(prim)
+        local_transform = xformable.GetLocalTransformation()
+        translation = local_transform.ExtractTranslation()
+        return {"position": [translation[0], translation[1], translation[2]]}
+
+    def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
+        stage = self.get_stage()
+        root = stage.GetPrimAtPath(root_path)
+        results: List[Dict[str, str]] = []
+        for prim in root.GetAllChildren():
+            ptype = prim.GetTypeName()
+            if prim_type and ptype != prim_type:
+                continue
+            results.append({"path": str(prim.GetPath()), "type": ptype})
+        return results
+
+    def get_prim_info(self, prim_path: str) -> Dict[str, Any]:
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        transform = self.get_prim_transform(prim_path)
+        children = [str(c.GetPath()) for c in prim.GetAllChildren()]
+        info: Dict[str, Any] = {
+            "path": prim_path,
+            "type": prim.GetTypeName(),
+            "transform": transform,
+            "children": children,
+        }
+        if prim.GetTypeName() in ("Cube", "Sphere", "Cylinder", "Cone", "Capsule"):
+            try:
+                actual_size, _bbox = self.get_prim_actual_size(prim_path)
+                info["actual_size"] = actual_size
+            except Exception:
+                pass
+        return info
+
+    def get_prim_actual_size(self, prim_path: str) -> Tuple[List[float], Tuple[List[float], List[float]]]:
+        # Identical to V5 — pure pxr/UsdGeom math.
+        from pxr import Usd, UsdGeom
+
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        prim_type = prim.GetTypeName()
+        xformable = UsdGeom.Xformable(prim)
+        local_transform = xformable.GetLocalTransformation()
+        scale = [
+            float(local_transform.GetRow3(0).GetLength()),
+            float(local_transform.GetRow3(1).GetLength()),
+            float(local_transform.GetRow3(2).GetLength()),
+        ]
+        if prim_type == "Cube":
+            geom = UsdGeom.Cube(prim)
+            size_attr = geom.GetSizeAttr()
+            size = float(size_attr.Get()) if size_attr and size_attr.Get() is not None else 1.0
+            dims = [size * scale[0], size * scale[1], size * scale[2]]
+        elif prim_type == "Sphere":
+            geom = UsdGeom.Sphere(prim)
+            radius_attr = geom.GetRadiusAttr()
+            radius = float(radius_attr.Get()) if radius_attr and radius_attr.Get() is not None else 0.5
+            diameter = radius * 2.0
+            dims = [diameter * scale[0], diameter * scale[1], diameter * scale[2]]
+        elif prim_type == "Cylinder":
+            geom = UsdGeom.Cylinder(prim)
+            radius_attr = geom.GetRadiusAttr()
+            height_attr = geom.GetHeightAttr()
+            axis_attr = geom.GetAxisAttr()
+            radius = float(radius_attr.Get()) if radius_attr and radius_attr.Get() is not None else 0.5
+            height = float(height_attr.Get()) if height_attr and height_attr.Get() is not None else 1.0
+            axis = axis_attr.Get() if axis_attr and axis_attr.Get() is not None else "Z"
+            diameter = radius * 2.0
+            if axis == "X":
+                dims = [height * scale[0], diameter * scale[1], diameter * scale[2]]
+            elif axis == "Y":
+                dims = [diameter * scale[0], height * scale[1], diameter * scale[2]]
+            else:
+                dims = [diameter * scale[0], diameter * scale[1], height * scale[2]]
+        elif prim_type == "Cone":
+            geom = UsdGeom.Cone(prim)
+            radius_attr = geom.GetRadiusAttr()
+            height_attr = geom.GetHeightAttr()
+            axis_attr = geom.GetAxisAttr()
+            radius = float(radius_attr.Get()) if radius_attr and radius_attr.Get() is not None else 0.5
+            height = float(height_attr.Get()) if height_attr and height_attr.Get() is not None else 1.0
+            axis = axis_attr.Get() if axis_attr and axis_attr.Get() is not None else "Z"
+            diameter = radius * 2.0
+            if axis == "X":
+                dims = [height * scale[0], diameter * scale[1], diameter * scale[2]]
+            elif axis == "Y":
+                dims = [diameter * scale[0], height * scale[1], diameter * scale[2]]
+            else:
+                dims = [diameter * scale[0], diameter * scale[1], height * scale[2]]
+        elif prim_type == "Capsule":
+            geom = UsdGeom.Capsule(prim)
+            radius_attr = geom.GetRadiusAttr()
+            height_attr = geom.GetHeightAttr()
+            radius = float(radius_attr.Get()) if radius_attr and radius_attr.Get() is not None else 0.5
+            height = float(height_attr.Get()) if height_attr and height_attr.Get() is not None else 1.0
+            total_height = height + 2.0 * radius
+            diameter = radius * 2.0
+            dims = [diameter * scale[0], diameter * scale[1], total_height * scale[2]]
+        else:
+            raise ValueError(f"Unsupported prim type for size calculation: {prim_type}")
+        world_transform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        translation = world_transform.ExtractTranslation()
+        pos = [float(translation[0]), float(translation[1]), float(translation[2])]
+        half = [d / 2.0 for d in dims]
+        bbox_min = [pos[0] - half[0], pos[1] - half[1], pos[2] - half[2]]
+        bbox_max = [pos[0] + half[0], pos[1] + half[1], pos[2] + half[2]]
+        return dims, (bbox_min, bbox_max)
+
+    # ── Robots ─────────────────────────────────────────────
+    # (Implemented in later tasks — raise NotImplementedError to surface issues clearly)
+
+    def create_xform_prim(self, prim_path: str) -> Any:
+        raise NotImplementedError("create_xform_prim: not yet implemented for V6")
+
+    def create_articulation(self, prim_path: str, name: str) -> Any:
+        raise NotImplementedError("create_articulation: not yet implemented for V6")
+
+    def discover_robots(self) -> Dict[str, Dict[str, str]]:
+        raise NotImplementedError("discover_robots: not yet implemented for V6")
+
+    def get_robot_joint_info(self, prim_path: str) -> Dict[str, Any]:
+        raise NotImplementedError("get_robot_joint_info: not yet implemented for V6")
+
+    def set_joint_positions(
+        self, prim_path: str, positions: Sequence[float], joint_indices: Optional[List[int]] = None
+    ) -> None:
+        raise NotImplementedError("set_joint_positions: not yet implemented for V6")
+
+    def get_joint_positions(self, prim_path: str) -> List[float]:
+        raise NotImplementedError("get_joint_positions: not yet implemented for V6")
+
+    def get_joint_config(self, prim_path: str) -> Dict[str, Any]:
+        raise NotImplementedError("get_joint_config: not yet implemented for V6")
+
+    # ── Physics ────────────────────────────────────────────
+
+    def create_world(self, **kwargs) -> Any:
+        raise NotImplementedError("create_world: not yet implemented for V6")
+
+    def create_simulation_context(self, **kwargs) -> Any:
+        raise NotImplementedError("create_simulation_context: not yet implemented for V6")
+
+    def create_physics_scene(self, gravity: Optional[Sequence[float]] = None, scene_name: str = "PhysicsScene") -> str:
+        raise NotImplementedError("create_physics_scene: not yet implemented for V6")
+
+    def get_physics_state(self, prim_path: str) -> Dict[str, Any]:
+        raise NotImplementedError("get_physics_state: not yet implemented for V6")
+
+    # ── Sensors ────────────────────────────────────────────
+
+    def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
+        raise NotImplementedError("create_camera: not yet implemented for V6")
+
+    def capture_camera_image(self, prim_path: str) -> np.ndarray:
+        raise NotImplementedError("capture_camera_image: not yet implemented for V6")
+
+    def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
+        raise NotImplementedError("create_lidar: not yet implemented for V6")
+
+    def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:
+        raise NotImplementedError("get_lidar_point_cloud: not yet implemented for V6")
+
+    # ── Materials ──────────────────────────────────────────
+
+    def create_pbr_material(
+        self,
+        prim_path: str,
+        color: Optional[Sequence[float]] = None,
+        roughness: float = 0.5,
+        metallic: float = 0.0,
+    ) -> Any:
+        raise NotImplementedError("create_pbr_material: not yet implemented for V6")
+
+    def create_physics_material(
+        self,
+        prim_path: str,
+        static_friction: float = 0.5,
+        dynamic_friction: float = 0.5,
+        restitution: float = 0.0,
+    ) -> Any:
+        raise NotImplementedError("create_physics_material: not yet implemented for V6")
+
+    def apply_material(self, material_path: str, target_prim_path: str) -> None:
+        raise NotImplementedError("apply_material: not yet implemented for V6")
+
+    # ── Lighting ───────────────────────────────────────────
+
+    def create_light(
+        self,
+        light_type: str,
+        prim_path: str,
+        intensity: float = 1000.0,
+        color: Optional[Sequence[float]] = None,
+        **kwargs,
+    ) -> Any:
+        raise NotImplementedError("create_light: not yet implemented for V6")
+
+    def modify_light(
+        self, prim_path: str, intensity: Optional[float] = None, color: Optional[Sequence[float]] = None
+    ) -> None:
+        raise NotImplementedError("modify_light: not yet implemented for V6")
+
+    def clone_prim(self, source_path: str, target_path: str) -> None:
+        raise NotImplementedError("clone_prim: not yet implemented for V6")
+
+    # ── Assets ─────────────────────────────────────────────
+
+    def import_urdf(self, urdf_path: str, prim_path: str = "/World/robot", **kwargs) -> Any:
+        raise NotImplementedError("import_urdf: not yet implemented for V6")
+
+    # ── Simulation ─────────────────────────────────────────
+
+    def play(self) -> None:
+        raise NotImplementedError("play: not yet implemented for V6")
+
+    def pause(self) -> None:
+        raise NotImplementedError("pause: not yet implemented for V6")
+
+    def stop(self) -> None:
+        raise NotImplementedError("stop: not yet implemented for V6")
+
+    def step(
+        self, num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        raise NotImplementedError("step: not yet implemented for V6")
+
+    def get_simulation_state(self) -> Dict[str, Any]:
+        raise NotImplementedError("get_simulation_state: not yet implemented for V6")
+
+    def execute_script(self, code: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+        raise NotImplementedError("execute_script: not yet implemented for V6")
+
+    def reload_script(self, file_path: str, module_name: Optional[str] = None) -> Dict[str, Any]:
+        raise NotImplementedError("reload_script: not yet implemented for V6")

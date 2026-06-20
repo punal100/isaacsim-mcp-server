@@ -99,3 +99,36 @@ def test_detect_version_returns_zero_on_failure(monkeypatch):
     import importlib, isaac_sim_mcp_extension.adapters as adapters_mod
     importlib.reload(adapters_mod)
     assert adapters_mod._detect_isaacsim_major_version() == 0
+
+
+def test_v6_create_prim_calls_experimental_define_prim(monkeypatch):
+    """V6.create_prim must call isaacsim.core.experimental.utils.stage.define_prim."""
+    define_prim_mock = MagicMock(return_value="prim-handle")
+    fake_stage_mod = types.ModuleType("isaacsim.core.experimental.utils.stage")
+    fake_stage_mod.define_prim = define_prim_mock
+    fake_stage_mod.add_reference_to_stage = MagicMock()
+    fake_stage_mod.delete_prim = MagicMock()
+    for name in ("isaacsim", "isaacsim.core", "isaacsim.core.experimental", "isaacsim.core.experimental.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.utils.stage", fake_stage_mod)
+
+    # SimulationManager mock for __init__
+    fake_sm_mod = types.ModuleType("isaacsim.core.simulation_manager")
+    class _SM:
+        @classmethod
+        def get_active_physics_engine(cls):
+            return "physx"
+    fake_sm_mod.SimulationManager = _SM
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", fake_sm_mod)
+
+    fake_version_mod = types.ModuleType("isaacsim.core.version")
+    fake_version_mod.get_version = lambda: "6.0.0"
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", fake_version_mod)
+
+    import importlib
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    result = adapter.create_prim("/World/Foo", "Xform")
+    define_prim_mock.assert_called_once_with("/World/Foo", type_name="Xform")
+    assert result == "prim-handle"
