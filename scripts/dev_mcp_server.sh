@@ -100,6 +100,7 @@ importlib.invalidate_caches()
 
 import isaac_sim_mcp_extension.adapters.base as base_mod
 import isaac_sim_mcp_extension.adapters.v5 as v5_mod
+import isaac_sim_mcp_extension.adapters.v6 as v6_mod
 import isaac_sim_mcp_extension.adapters as adapters_init
 import isaac_sim_mcp_extension.handlers.robots as robots_mod
 import isaac_sim_mcp_extension.handlers.scene as scene_mod
@@ -115,6 +116,7 @@ import isaac_sim_mcp_extension.handlers as handlers_init
 # Reload adapter layer first, then handlers, then __init__ modules
 importlib.reload(base_mod)
 importlib.reload(v5_mod)
+importlib.reload(v6_mod)
 importlib.reload(adapters_init)
 importlib.reload(robots_mod)
 importlib.reload(scene_mod)
