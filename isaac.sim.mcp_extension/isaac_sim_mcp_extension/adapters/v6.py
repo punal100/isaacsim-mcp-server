@@ -283,7 +283,43 @@ class IsaacAdapterV6(IsaacAdapterBase):
         raise NotImplementedError("create_articulation: not yet implemented for V6")
 
     def discover_robots(self) -> Dict[str, Dict[str, str]]:
-        raise NotImplementedError("discover_robots: not yet implemented for V6")
+        import omni.client
+        from isaacsim.storage.native import get_assets_root_path
+
+        root = get_assets_root_path()
+        robots_base = root + "/Isaac/Robots/"
+        discovered: Dict[str, Dict[str, str]] = {}
+        result, manufacturers = omni.client.list(robots_base)
+        if result != omni.client.Result.OK:
+            return discovered
+        for mfr_entry in manufacturers:
+            mfr_name = mfr_entry.relative_path.rstrip("/")
+            mfr_path = robots_base + mfr_name + "/"
+            result2, models = omni.client.list(mfr_path)
+            if result2 != omni.client.Result.OK:
+                continue
+            for model_entry in models:
+                model_name = model_entry.relative_path.rstrip("/")
+                model_path = mfr_path + model_name + "/"
+                result3, files = omni.client.list(model_path)
+                if result3 != omni.client.Result.OK:
+                    continue
+                for file_entry in files:
+                    fname = file_entry.relative_path
+                    if not (fname.endswith(".usd") or fname.endswith(".usda")):
+                        continue
+                    asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
+                    key = model_name.lower().replace(" ", "_")
+                    if key in discovered:
+                        if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
+                            discovered[key]["asset_path"] = asset_rel
+                    else:
+                        discovered[key] = {
+                            "asset_path": asset_rel,
+                            "description": f"{mfr_name} {model_name}",
+                            "manufacturer": mfr_name,
+                        }
+        return discovered
 
     def get_robot_joint_info(self, prim_path: str) -> Dict[str, Any]:
         raise NotImplementedError("get_robot_joint_info: not yet implemented for V6")
