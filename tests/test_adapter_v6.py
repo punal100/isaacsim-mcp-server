@@ -166,3 +166,49 @@ def test_v6_ensure_physics_world_calls_simulation_manager(monkeypatch):
     assert ("initialize_physics",) in sm_calls
     # And confirm we picked up the engine
     assert adapter._engine == "newton"
+
+
+def test_v6_set_joint_positions_calls_set_dof_position_targets(monkeypatch):
+    """V6.set_joint_positions must build an Articulation and forward to set_dof_position_targets."""
+    captured = {}
+
+    class _Articulation:
+        def __init__(self, paths):
+            captured["paths"] = paths
+
+        def is_physics_tensor_entity_initialized(self):
+            return True
+
+        def set_dof_position_targets(self, positions, indices=None):
+            captured["positions"] = positions
+            captured["indices"] = indices
+
+        def get_dof_indices(self, names):
+            captured["dof_indices_names"] = names
+
+    fake_prims_mod = types.ModuleType("isaacsim.core.experimental.prims")
+    fake_prims_mod.Articulation = _Articulation
+
+    fake_warp_mod = types.ModuleType("warp")
+    fake_warp_mod.array = lambda data, dtype=None: list(data)
+    fake_warp_mod.float32 = "float32"
+
+    monkeypatch.setitem(sys.modules, "warp", fake_warp_mod)
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental", types.ModuleType("isaacsim.core.experimental"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.prims", fake_prims_mod)
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
+                        types.SimpleNamespace(SimulationManager=type("SM", (), {
+                            "get_active_physics_engine": classmethod(lambda cls: "physx"),
+                            "setup_simulation": classmethod(lambda cls, dt=None, device=None: None),
+                            "initialize_physics": classmethod(lambda cls: None),
+                        })))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
+                        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+
+    import importlib
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    adapter.set_joint_positions("/World/Franka", [0.1, 0.2, 0.3])
+    assert captured["paths"] == ["/World/Franka"]
+    assert list(captured["positions"][0]) == [0.1, 0.2, 0.3]

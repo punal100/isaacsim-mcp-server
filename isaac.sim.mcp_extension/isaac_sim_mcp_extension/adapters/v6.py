@@ -274,13 +274,21 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return dims, (bbox_min, bbox_max)
 
     # ── Robots ─────────────────────────────────────────────
-    # (Implemented in later tasks — raise NotImplementedError to surface issues clearly)
 
     def create_xform_prim(self, prim_path: str) -> Any:
-        raise NotImplementedError("create_xform_prim: not yet implemented for V6")
+        from isaacsim.core.experimental.prims import XformPrim
+
+        return XformPrim(paths=[prim_path])
 
     def create_articulation(self, prim_path: str, name: str) -> Any:
-        raise NotImplementedError("create_articulation: not yet implemented for V6")
+        from isaacsim.core.experimental.prims import Articulation
+
+        return Articulation(paths=[prim_path])
+
+    def _new_articulation(self, prim_path: str) -> Any:
+        from isaacsim.core.experimental.prims import Articulation
+
+        return Articulation(paths=[prim_path])
 
     def discover_robots(self) -> Dict[str, Dict[str, str]]:
         import omni.client
@@ -322,18 +330,243 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return discovered
 
     def get_robot_joint_info(self, prim_path: str) -> Dict[str, Any]:
-        raise NotImplementedError("get_robot_joint_info: not yet implemented for V6")
+        from pxr import Usd, UsdPhysics
+
+        joint_names: List[str] = []
+        num_dof = 0
+        try:
+            self._ensure_physics_world()
+            art = self._new_articulation(prim_path)
+            joint_names = list(art.dof_names) if art.dof_names else []
+            num_dof = int(art.num_dofs) if art.num_dofs else 0
+        except Exception:
+            pass
+
+        stage = self.get_stage()
+        root_prim = stage.GetPrimAtPath(prim_path)
+        if not joint_names and root_prim.IsValid():
+            for desc in Usd.PrimRange(root_prim):
+                if desc.IsA(UsdPhysics.RevoluteJoint) or desc.IsA(UsdPhysics.PrismaticJoint):
+                    joint_names.append(desc.GetName())
+            num_dof = len(joint_names)
+
+        joint_limits = []
+        for jname in joint_names:
+            limit_entry: Dict[str, Any] = {"name": jname}
+            for desc in Usd.PrimRange(root_prim):
+                if desc.GetName() != jname:
+                    continue
+                if desc.IsA(UsdPhysics.RevoluteJoint):
+                    rev = UsdPhysics.RevoluteJoint(desc)
+                    lo = rev.GetLowerLimitAttr().Get()
+                    hi = rev.GetUpperLimitAttr().Get()
+                    limit_entry["type"] = "revolute"
+                    limit_entry["lower"] = float(lo) if lo is not None else None
+                    limit_entry["upper"] = float(hi) if hi is not None else None
+                    limit_entry["units"] = "degrees"
+                    break
+                if desc.IsA(UsdPhysics.PrismaticJoint):
+                    pris = UsdPhysics.PrismaticJoint(desc)
+                    lo = pris.GetLowerLimitAttr().Get()
+                    hi = pris.GetUpperLimitAttr().Get()
+                    limit_entry["type"] = "prismatic"
+                    limit_entry["lower"] = float(lo) if lo is not None else None
+                    limit_entry["upper"] = float(hi) if hi is not None else None
+                    limit_entry["units"] = "meters"
+                    break
+            joint_limits.append(limit_entry)
+        return {"joint_names": joint_names, "num_dof": num_dof, "joint_limits": joint_limits}
 
     def set_joint_positions(
-        self, prim_path: str, positions: Sequence[float], joint_indices: Optional[List[int]] = None
+        self,
+        prim_path: str,
+        positions: Sequence[float],
+        joint_indices: Optional[List[int]] = None,
     ) -> None:
-        raise NotImplementedError("set_joint_positions: not yet implemented for V6")
+        import warp as wp
+
+        try:
+            self._ensure_physics_world()
+            art = self._new_articulation(prim_path)
+            positions_arr = wp.array([list(positions)], dtype=wp.float32)
+            if joint_indices is not None:
+                idx_arr = wp.array(list(joint_indices), dtype=wp.int32)
+                art.set_dof_position_targets(positions_arr, indices=idx_arr)
+            else:
+                art.set_dof_position_targets(positions_arr)
+            return
+        except Exception:
+            pass
+        # USD-drive fallback (sim stopped / articulation not yet initialised)
+        self._set_joint_drive_targets(prim_path, positions, joint_indices)
+
+    def _set_joint_drive_targets(
+        self,
+        prim_path: str,
+        positions: Sequence[float],
+        joint_indices: Optional[List[int]] = None,
+    ) -> None:
+        # Identical to V5 — pure pxr.UsdPhysics.
+        from pxr import Usd, UsdPhysics
+
+        stage = self.get_stage()
+        root_prim = stage.GetPrimAtPath(prim_path)
+        if not root_prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        joints = []
+        for desc in Usd.PrimRange(root_prim):
+            if desc.IsA(UsdPhysics.RevoluteJoint) or desc.IsA(UsdPhysics.PrismaticJoint):
+                joints.append(desc)
+        if joint_indices is not None:
+            targets = list(zip(joint_indices, positions))
+        else:
+            targets = list(enumerate(positions))
+        for idx, value in targets:
+            if idx >= len(joints):
+                continue
+            joint_prim = joints[idx]
+            is_revolute = joint_prim.IsA(UsdPhysics.RevoluteJoint)
+            drive_type = "angular" if is_revolute else "linear"
+            drive = UsdPhysics.DriveAPI.Get(joint_prim, drive_type)
+            if not drive:
+                drive = UsdPhysics.DriveAPI.Apply(joint_prim, drive_type)
+            if is_revolute:
+                drive.GetTargetPositionAttr().Set(float(np.degrees(value)))
+            else:
+                drive.GetTargetPositionAttr().Set(float(value * 100.0))
+
+    def _get_joint_names(self, prim_path: str) -> List[str]:
+        try:
+            self._ensure_physics_world()
+            art = self._new_articulation(prim_path)
+            if art.dof_names:
+                return list(art.dof_names)
+        except Exception:
+            pass
+        from pxr import Usd, UsdPhysics
+
+        stage = self.get_stage()
+        root_prim = stage.GetPrimAtPath(prim_path)
+        if not root_prim.IsValid():
+            return []
+        names: List[str] = []
+        for desc in Usd.PrimRange(root_prim):
+            if desc.IsA(UsdPhysics.RevoluteJoint) or desc.IsA(UsdPhysics.PrismaticJoint):
+                names.append(desc.GetName())
+        return names
 
     def get_joint_positions(self, prim_path: str) -> List[float]:
-        raise NotImplementedError("get_joint_positions: not yet implemented for V6")
+        try:
+            self._ensure_physics_world()
+            art = self._new_articulation(prim_path)
+            positions = art.get_dof_positions()
+            if positions is not None:
+                # batched (1, num_dofs) wp.array → flat list
+                arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
+                return arr.reshape(-1).tolist()
+        except Exception:
+            pass
+        # USD fallback identical to V5
+        from pxr import Usd, UsdPhysics
+
+        stage = self.get_stage()
+        root_prim = stage.GetPrimAtPath(prim_path)
+        if not root_prim.IsValid():
+            return []
+        positions_list: List[float] = []
+        for desc in Usd.PrimRange(root_prim):
+            if not (desc.IsA(UsdPhysics.RevoluteJoint) or desc.IsA(UsdPhysics.PrismaticJoint)):
+                continue
+            is_revolute = desc.IsA(UsdPhysics.RevoluteJoint)
+            drive_type = "angular" if is_revolute else "linear"
+            drive = UsdPhysics.DriveAPI.Get(desc, drive_type)
+            if drive:
+                target = drive.GetTargetPositionAttr().Get()
+                if target is not None:
+                    if is_revolute:
+                        positions_list.append(float(np.radians(target)))
+                    else:
+                        positions_list.append(float(target / 100.0))
+                else:
+                    positions_list.append(0.0)
+            else:
+                positions_list.append(0.0)
+        return positions_list
 
     def get_joint_config(self, prim_path: str) -> Dict[str, Any]:
-        raise NotImplementedError("get_joint_config: not yet implemented for V6")
+        from pxr import Usd, UsdPhysics
+
+        self._ensure_physics_world()
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+        joint_names = self._get_joint_names(prim_path)
+        current_pos_list = self.get_joint_positions(prim_path)
+
+        runtime_targets: List[float] = []
+        try:
+            art = self._new_articulation(prim_path)
+            targets = art.get_dof_position_targets()
+            if targets is not None:
+                arr = targets.numpy() if hasattr(targets, "numpy") else np.asarray(targets)
+                runtime_targets = arr.reshape(-1).tolist()
+        except Exception:
+            pass
+
+        joints_info = []
+        for desc in Usd.PrimRange(prim):
+            if desc.IsA(UsdPhysics.RevoluteJoint) or desc.IsA(UsdPhysics.PrismaticJoint):
+                joint_data: Dict[str, Any] = {"name": desc.GetName()}
+                if desc.IsA(UsdPhysics.RevoluteJoint):
+                    joint_data["type"] = "revolute"
+                    joint_api = UsdPhysics.RevoluteJoint(desc)
+                else:
+                    joint_data["type"] = "prismatic"
+                    joint_api = UsdPhysics.PrismaticJoint(desc)
+                lower_attr = joint_api.GetLowerLimitAttr()
+                upper_attr = joint_api.GetUpperLimitAttr()
+                joint_data["lower_limit"] = lower_attr.Get() if lower_attr else None
+                joint_data["upper_limit"] = upper_attr.Get() if upper_attr else None
+                for drive_type in ["angular", "linear"]:
+                    drive_api = UsdPhysics.DriveAPI.Get(desc, drive_type)
+                    if drive_api:
+                        joint_data["drive_type"] = drive_type
+                        stiffness_attr = drive_api.GetStiffnessAttr()
+                        damping_attr = drive_api.GetDampingAttr()
+                        target_attr = drive_api.GetTargetPositionAttr()
+                        joint_data["stiffness"] = stiffness_attr.Get() if stiffness_attr else None
+                        joint_data["damping"] = damping_attr.Get() if damping_attr else None
+                        joint_data["target_position"] = target_attr.Get() if target_attr else None
+                        break
+                jname = desc.GetName()
+                if jname in joint_names:
+                    idx = joint_names.index(jname)
+                    if idx < len(current_pos_list):
+                        joint_data["actual_position"] = current_pos_list[idx]
+                    if idx < len(runtime_targets):
+                        joint_data["target_position"] = float(runtime_targets[idx])
+                    if joint_data.get("target_position") is not None and "actual_position" in joint_data:
+                        joint_data["position_error"] = joint_data["target_position"] - joint_data["actual_position"]
+                joints_info.append(joint_data)
+
+        warnings = []
+        for j in joints_info:
+            stiff = j.get("stiffness")
+            damp = j.get("damping")
+            if stiff is not None and stiff == 0 and (damp is None or damp == 0):
+                warnings.append(
+                    f"Joint '{j['name']}' has stiffness=0 and damping=0 — "
+                    f"its drive is effectively disabled and will not respond to position targets."
+                )
+        result: Dict[str, Any] = {
+            "prim_path": prim_path,
+            "joint_count": len(joints_info),
+            "joints": joints_info,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     # ── Physics ────────────────────────────────────────────
 
