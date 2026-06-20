@@ -56,9 +56,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Scene ──────────────────────────────────────────────
 
     def get_stage(self) -> "Usd.Stage":
-        import importlib
+        import omni.usd
 
-        return importlib.import_module("omni.usd").get_context().get_stage()
+        return omni.usd.get_context().get_stage()
 
     def get_assets_root_path(self) -> str:
         from isaacsim.storage.native import get_assets_root_path
@@ -705,20 +705,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Simulation ─────────────────────────────────────────
 
     def play(self) -> None:
-        import importlib
+        import omni.timeline
 
         self._ensure_physics_world()
-        importlib.import_module("omni.timeline").get_timeline_interface().play()
+        omni.timeline.get_timeline_interface().play()
 
     def pause(self) -> None:
-        import importlib
+        import omni.timeline
 
-        importlib.import_module("omni.timeline").get_timeline_interface().pause()
+        omni.timeline.get_timeline_interface().pause()
 
     def stop(self) -> None:
-        import importlib
+        import omni.timeline
 
-        importlib.import_module("omni.timeline").get_timeline_interface().stop()
+        omni.timeline.get_timeline_interface().stop()
 
     def step(
         self,
@@ -790,9 +790,10 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return result
 
     def get_simulation_state(self) -> Dict[str, Any]:
-        import importlib
+        import omni.timeline
+        from pxr import UsdPhysics
 
-        timeline = importlib.import_module("omni.timeline").get_timeline_interface()
+        timeline = omni.timeline.get_timeline_interface()
         is_playing = timeline.is_playing()
         is_stopped = timeline.is_stopped()
         if is_playing:
@@ -805,10 +806,8 @@ class IsaacAdapterV6(IsaacAdapterBase):
         current_time = timeline.get_current_time()
         stage = self.get_stage()
         physics_dt = 1.0 / 60.0
-        try:
-            from pxr import UsdPhysics
-
-            for prim in stage.Traverse():
+        for prim in stage.Traverse():
+            try:
                 if prim.HasAPI(UsdPhysics.Scene):
                     time_step_attr = prim.GetAttribute("physxScene:timeStepsPerSecond")
                     if time_step_attr and time_step_attr.Get():
@@ -816,8 +815,8 @@ class IsaacAdapterV6(IsaacAdapterBase):
                         if steps_per_sec > 0:
                             physics_dt = 1.0 / steps_per_sec
                     break
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         return {
             "timeline_state": timeline_state,

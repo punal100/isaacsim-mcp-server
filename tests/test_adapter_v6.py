@@ -221,8 +221,10 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     fake_timeline_iface.get_current_time.return_value = 0.0
     fake_timeline_mod = types.ModuleType("omni.timeline")
     fake_timeline_mod.get_timeline_interface = lambda: fake_timeline_iface
-    monkeypatch.setitem(sys.modules, "omni", types.ModuleType("omni"))
+    fake_omni_mod = types.ModuleType("omni")
+    monkeypatch.setitem(sys.modules, "omni", fake_omni_mod)
     monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline_mod)
+    fake_omni_mod.timeline = fake_timeline_mod
 
     class _Stage:
         def Traverse(self):
@@ -230,6 +232,7 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     fake_usd_mod = types.ModuleType("omni.usd")
     fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
     monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
+    fake_omni_mod.usd = fake_usd_mod
 
     monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
         types.SimpleNamespace(SimulationManager=type("SM", (), {
