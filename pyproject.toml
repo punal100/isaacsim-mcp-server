@@ -48,6 +48,9 @@ isaacsim-mcp-server = "isaac_mcp.server:main"
 [tool.hatch.version]
 path = "isaac_mcp/__init__.py"
 
+[tool.pytest.ini_options]
+pythonpath = ["isaac.sim.mcp_extension"]
+
 [tool.hatch.build.targets.sdist]
 include = ["isaac_mcp/"]
 

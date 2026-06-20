@@ -23,13 +23,54 @@
 
 """Isaac Sim version adapters."""
 
+from __future__ import annotations
+
+import os
+import re
+
+
+def _detect_isaacsim_major_version() -> int:
+    """Return the major version of the running Isaac Sim runtime, or 0 on failure."""
+    try:
+        from isaacsim.core.version import get_version  # type: ignore
+
+        version_str = get_version()
+        match = re.match(r"^(\d+)\.", str(version_str))
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+
+    # Fallback: read $ISAAC_PATH/VERSION (set by Isaac Sim launcher) or sibling VERSION file
+    for env_var in ("ISAAC_PATH", "ISAACSIM_PATH"):
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        version_file = os.path.join(root, "VERSION")
+        if os.path.isfile(version_file):
+            try:
+                with open(version_file) as f:
+                    text = f.read().strip()
+                match = re.match(r"^(\d+)\.", text)
+                if match:
+                    return int(match.group(1))
+            except OSError:
+                continue
+    return 0
+
 
 def get_adapter():
     """Return the appropriate adapter for the current Isaac Sim version.
 
-    Currently only supports Isaac Sim 5.1.0.
-    Future versions will detect the runtime version and return the matching adapter.
+    Selects ``IsaacAdapterV6`` when the runtime reports major version >= 6,
+    ``IsaacAdapterV5`` otherwise (including detection failure, which is safe
+    under 5.1 and produces a clear ImportError under 6.0 Newton — directing
+    the user to upgrade).
     """
+    if _detect_isaacsim_major_version() >= 6:
+        from .v6 import IsaacAdapterV6
+
+        return IsaacAdapterV6()
     from .v5 import IsaacAdapterV5
 
     return IsaacAdapterV5()
