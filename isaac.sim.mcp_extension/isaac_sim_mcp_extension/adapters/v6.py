@@ -596,7 +596,49 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return scene_path
 
     def get_physics_state(self, prim_path: str) -> Dict[str, Any]:
-        raise NotImplementedError("get_physics_state: not yet implemented for V6")
+        from pxr import UsdPhysics
+
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Prim not found: {prim_path}")
+
+        result: Dict[str, Any] = {"prim_path": prim_path}
+        has_rb = prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        result["has_rigid_body"] = has_rb
+        if has_rb:
+            rb = UsdPhysics.RigidBodyAPI(prim)
+            kinematic_attr = rb.GetKinematicEnabledAttr()
+            result["is_kinematic"] = kinematic_attr.Get() if kinematic_attr else False
+        has_mass = prim.HasAPI(UsdPhysics.MassAPI)
+        if has_mass:
+            mass_api = UsdPhysics.MassAPI(prim)
+            mass_attr = mass_api.GetMassAttr()
+            result["mass"] = mass_attr.Get() if mass_attr else None
+        result["collision_enabled"] = prim.HasAPI(UsdPhysics.CollisionAPI)
+
+        if has_rb:
+            lin_vel = [0.0, 0.0, 0.0]
+            ang_vel = [0.0, 0.0, 0.0]
+            try:
+                from isaacsim.core.simulation_manager import SimulationManager
+
+                view = SimulationManager.get_physics_simulation_view()
+                if view is not None:
+                    rb_view = view.create_rigid_body_view([prim_path])
+                    vels = rb_view.get_velocities()
+                    arr = vels.numpy() if hasattr(vels, "numpy") else np.asarray(vels)
+                    if arr.size >= 6:
+                        flat = arr.reshape(-1)[:6]
+                        lin_vel = [float(flat[0]), float(flat[1]), float(flat[2])]
+                        ang_vel = [float(flat[3]), float(flat[4]), float(flat[5])]
+            except Exception:
+                pass
+            result["linear_velocity"] = lin_vel
+            result["angular_velocity"] = ang_vel
+
+        result["contacts"] = []
+        return result
 
     # ── Sensors ────────────────────────────────────────────
 
