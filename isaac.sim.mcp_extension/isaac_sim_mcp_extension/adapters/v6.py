@@ -643,16 +643,46 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Sensors ────────────────────────────────────────────
 
     def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
-        raise NotImplementedError("create_camera: not yet implemented for V6")
+        from isaacsim.sensors.experimental.rtx import RtxCamera
+
+        return RtxCamera(prim_paths=[prim_path], resolutions=[resolution])
 
     def capture_camera_image(self, prim_path: str) -> np.ndarray:
-        raise NotImplementedError("capture_camera_image: not yet implemented for V6")
+        from isaacsim.sensors.experimental.rtx import CameraSensor
+
+        sensor = CameraSensor(prim_paths=[prim_path])
+        sensor.attach_annotators(["rgb"])
+        try:
+            import omni.kit.app
+
+            omni.kit.app.get_app().update()
+        except Exception:
+            pass
+        data = sensor.get_annotator_data("rgb")
+        if isinstance(data, list):
+            data = data[0]
+        return np.asarray(data)
 
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
-        raise NotImplementedError("create_lidar: not yet implemented for V6")
+        from isaacsim.sensors.experimental.rtx import Lidar
+
+        return Lidar(prim_paths=[prim_path], configs=[config or "Example_Rotary"])
 
     def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:
-        raise NotImplementedError("get_lidar_point_cloud: not yet implemented for V6")
+        from isaacsim.sensors.experimental.rtx import LidarSensor
+
+        sensor = LidarSensor(prim_paths=[prim_path])
+        sensor.attach_annotators(["RtxSensorCpu" + "IsaacComputeRTXLidarPointCloud"])
+        try:
+            import omni.kit.app
+
+            omni.kit.app.get_app().update()
+        except Exception:
+            pass
+        data = sensor.get_annotator_data("RtxSensorCpu" + "IsaacComputeRTXLidarPointCloud")
+        if isinstance(data, list):
+            data = data[0]
+        return np.asarray(data.get("data") if isinstance(data, dict) else data)
 
     # ── Materials ──────────────────────────────────────────
 
