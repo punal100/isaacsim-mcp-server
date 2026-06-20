@@ -56,9 +56,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Scene ──────────────────────────────────────────────
 
     def get_stage(self) -> "Usd.Stage":
-        import omni.usd
+        import importlib
 
-        return omni.usd.get_context().get_stage()
+        return importlib.import_module("omni.usd").get_context().get_stage()
 
     def get_assets_root_path(self) -> str:
         from isaacsim.storage.native import get_assets_root_path
@@ -705,24 +705,235 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Simulation ─────────────────────────────────────────
 
     def play(self) -> None:
-        raise NotImplementedError("play: not yet implemented for V6")
+        import importlib
+
+        self._ensure_physics_world()
+        importlib.import_module("omni.timeline").get_timeline_interface().play()
 
     def pause(self) -> None:
-        raise NotImplementedError("pause: not yet implemented for V6")
+        import importlib
+
+        importlib.import_module("omni.timeline").get_timeline_interface().pause()
 
     def stop(self) -> None:
-        raise NotImplementedError("stop: not yet implemented for V6")
+        import importlib
+
+        importlib.import_module("omni.timeline").get_timeline_interface().stop()
 
     def step(
-        self, num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
+        self,
+        num_steps: int = 1,
+        observe_prims: Optional[List[str]] = None,
+        observe_joints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        raise NotImplementedError("step: not yet implemented for V6")
+        import omni.kit.app
+
+        for _ in range(num_steps):
+            omni.kit.app.get_app().update()
+
+        result: Dict[str, Any] = {"stepped": num_steps}
+
+        if observe_prims:
+            from pxr import UsdPhysics
+
+            prim_states = []
+            stage = self.get_stage()
+            for path in observe_prims:
+                prim = stage.GetPrimAtPath(path)
+                if not prim.IsValid():
+                    prim_states.append({"prim_path": path, "error": "Prim not found"})
+                    continue
+                state: Dict[str, Any] = {"prim_path": path}
+                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    try:
+                        from isaacsim.core.simulation_manager import SimulationManager
+
+                        view = SimulationManager.get_physics_simulation_view()
+                        rb_view = view.create_rigid_body_view([path]) if view is not None else None
+                        if rb_view is not None:
+                            transforms = rb_view.get_transforms()
+                            arr = transforms.numpy() if hasattr(transforms, "numpy") else np.asarray(transforms)
+                            if arr.size >= 3:
+                                flat = arr.reshape(-1)
+                                state["position"] = [float(flat[0]), float(flat[1]), float(flat[2])]
+                        else:
+                            transform = self.get_prim_transform(path)
+                            state["position"] = transform.get("position", [0, 0, 0])
+                    except Exception:
+                        transform = self.get_prim_transform(path)
+                        state["position"] = transform.get("position", [0, 0, 0])
+                else:
+                    transform = self.get_prim_transform(path)
+                    state["position"] = transform.get("position", [0, 0, 0])
+                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    try:
+                        ps = self.get_physics_state(path)
+                        state["linear_velocity"] = ps.get("linear_velocity", [0, 0, 0])
+                        state["angular_velocity"] = ps.get("angular_velocity", [0, 0, 0])
+                    except Exception:
+                        pass
+                prim_states.append(state)
+            result["prim_states"] = prim_states
+
+        if observe_joints:
+            joint_states = []
+            for path in observe_joints:
+                try:
+                    positions = self.get_joint_positions(path)
+                    names = self._get_joint_names(path)
+                    joints_dict = dict(zip(names, positions)) if names else {"positions": positions}
+                    joint_states.append({"prim_path": path, "joints": joints_dict})
+                except Exception as e:
+                    joint_states.append({"prim_path": path, "error": str(e)})
+            result["joint_states"] = joint_states
+
+        return result
 
     def get_simulation_state(self) -> Dict[str, Any]:
-        raise NotImplementedError("get_simulation_state: not yet implemented for V6")
+        import importlib
+
+        timeline = importlib.import_module("omni.timeline").get_timeline_interface()
+        is_playing = timeline.is_playing()
+        is_stopped = timeline.is_stopped()
+        if is_playing:
+            timeline_state = "playing"
+        elif is_stopped:
+            timeline_state = "stopped"
+        else:
+            timeline_state = "paused"
+
+        current_time = timeline.get_current_time()
+        stage = self.get_stage()
+        physics_dt = 1.0 / 60.0
+        try:
+            from pxr import UsdPhysics
+
+            for prim in stage.Traverse():
+                if prim.HasAPI(UsdPhysics.Scene):
+                    time_step_attr = prim.GetAttribute("physxScene:timeStepsPerSecond")
+                    if time_step_attr and time_step_attr.Get():
+                        steps_per_sec = time_step_attr.Get()
+                        if steps_per_sec > 0:
+                            physics_dt = 1.0 / steps_per_sec
+                    break
+        except Exception:
+            pass
+
+        return {
+            "timeline_state": timeline_state,
+            "current_time": current_time,
+            "physics_dt": physics_dt,
+            "engine": self._engine,
+            "isaacsim_version": self._isaacsim_version,
+        }
 
     def execute_script(self, code: str, cwd: Optional[str] = None) -> Dict[str, Any]:
-        raise NotImplementedError("execute_script: not yet implemented for V6")
+        import io
+        import sys
+        import traceback
+
+        import carb
+        import omni
+        from pxr import Gf, Sdf, Usd, UsdGeom
+
+        if cwd and cwd not in sys.path:
+            sys.path.insert(0, cwd)
+
+        local_ns = {"omni": omni, "carb": carb, "Usd": Usd, "UsdGeom": UsdGeom, "Sdf": Sdf, "Gf": Gf}
+
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = captured_out = io.StringIO()
+        sys.stderr = captured_err = io.StringIO()
+        try:
+            self._ensure_physics_world()
+            exec(code, local_ns)
+            return {
+                "status": "success",
+                "message": "Script executed successfully",
+                "stdout": captured_out.getvalue(),
+                "stderr": captured_err.getvalue(),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+                "stdout": captured_out.getvalue(),
+                "stderr": captured_err.getvalue(),
+            }
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
+    _exec_namespaces: Dict[str, dict] = {}
 
     def reload_script(self, file_path: str, module_name: Optional[str] = None) -> Dict[str, Any]:
-        raise NotImplementedError("reload_script: not yet implemented for V6")
+        import importlib
+        import io
+        import os
+        import sys
+        import traceback
+
+        parent_dir = os.path.dirname(os.path.abspath(file_path))
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+
+        abs_path = os.path.abspath(file_path)
+        old_ns = self._exec_namespaces.get(abs_path)
+        if old_ns:
+            for key, val in old_ns.items():
+                if hasattr(val, "unsubscribe"):
+                    try:
+                        val.unsubscribe()
+                    except Exception:
+                        pass
+
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout = captured_out = io.StringIO()
+        sys.stderr = captured_err = io.StringIO()
+        try:
+            if module_name:
+                if module_name in sys.modules:
+                    _module = importlib.reload(sys.modules[module_name])
+                    msg = f"Module '{module_name}' reloaded successfully"
+                else:
+                    _module = importlib.import_module(module_name)
+                    msg = f"Module '{module_name}' imported successfully"
+            else:
+                if not os.path.isfile(file_path):
+                    return {"status": "error", "message": f"File not found: {file_path}"}
+                with open(file_path, "r") as f:
+                    code = f.read()
+                import carb
+                import omni
+                from pxr import Gf, Sdf, Usd, UsdGeom
+
+                local_ns = {
+                    "omni": omni,
+                    "carb": carb,
+                    "Usd": Usd,
+                    "UsdGeom": UsdGeom,
+                    "Sdf": Sdf,
+                    "Gf": Gf,
+                    "__file__": file_path,
+                }
+                self._ensure_physics_world()
+                exec(code, local_ns)
+                self._exec_namespaces[abs_path] = local_ns
+                msg = f"Script '{os.path.basename(file_path)}' executed successfully"
+
+            return {
+                "status": "success",
+                "message": msg,
+                "stdout": captured_out.getvalue(),
+                "stderr": captured_err.getvalue(),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+                "stdout": captured_out.getvalue(),
+                "stderr": captured_err.getvalue(),
+            }
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr

@@ -212,3 +212,37 @@ def test_v6_set_joint_positions_calls_set_dof_position_targets(monkeypatch):
     adapter.set_joint_positions("/World/Franka", [0.1, 0.2, 0.3])
     assert captured["paths"] == ["/World/Franka"]
     assert list(captured["positions"][0]) == [0.1, 0.2, 0.3]
+
+
+def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
+    fake_timeline_iface = MagicMock()
+    fake_timeline_iface.is_playing.return_value = False
+    fake_timeline_iface.is_stopped.return_value = True
+    fake_timeline_iface.get_current_time.return_value = 0.0
+    fake_timeline_mod = types.ModuleType("omni.timeline")
+    fake_timeline_mod.get_timeline_interface = lambda: fake_timeline_iface
+    monkeypatch.setitem(sys.modules, "omni", types.ModuleType("omni"))
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline_mod)
+
+    class _Stage:
+        def Traverse(self):
+            return []
+    fake_usd_mod = types.ModuleType("omni.usd")
+    fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
+
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(SimulationManager=type("SM", (), {
+            "get_active_physics_engine": classmethod(lambda cls: "newton"),
+        })))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
+        types.SimpleNamespace(get_version=lambda: "6.0.0-rc.59"))
+
+    import importlib
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    state = adapter.get_simulation_state()
+    assert state["engine"] == "newton"
+    assert state["isaacsim_version"] == "6.0.0-rc.59"
+    assert state["timeline_state"] == "stopped"
