@@ -7,10 +7,13 @@ category = "Robotics"
 keywords = ["mcp", "server", "socket", "simulation", "robotics"]
 
 [dependencies]
-"isaacsim.core.api" = {}
-"isaacsim.core.prims" = {}
-"isaacsim.core.utils" = {}
 "isaacsim.storage.native" = {}
+"isaacsim.core.simulation_manager" = {}
+"isaacsim.core.experimental.utils" = {}
+"isaacsim.core.experimental.prims" = {}
+"isaacsim.core.experimental.objects" = {}
+"isaacsim.sensors.experimental.rtx" = {}
+"isaacsim.asset.importer.urdf" = {}
 "omni.kit.uiapp" = {}
 "isaacsim.gui.components" = {}
 
