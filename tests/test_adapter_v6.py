@@ -249,3 +249,44 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     assert state["engine"] == "newton"
     assert state["isaacsim_version"] == "6.0.0-rc.59"
     assert state["timeline_state"] == "stopped"
+
+
+def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
+    urdf_file = tmp_path / "robot.urdf"
+    urdf_file.write_text("<robot name='r'/>")
+
+    captured = {}
+
+    class _Config:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs
+
+    class _Importer:
+        def __init__(self, config):
+            captured["importer_config"] = config
+
+        def import_urdf(self, config=None):
+            return "/World/robot"
+
+    fake_urdf_mod = types.ModuleType("isaacsim.asset.importer.urdf")
+    fake_urdf_mod.URDFImporter = _Importer
+    fake_urdf_mod.URDFImporterConfig = _Config
+    monkeypatch.setitem(sys.modules, "isaacsim", types.ModuleType("isaacsim"))
+    monkeypatch.setitem(sys.modules, "isaacsim.asset", types.ModuleType("isaacsim.asset"))
+    monkeypatch.setitem(sys.modules, "isaacsim.asset.importer", types.ModuleType("isaacsim.asset.importer"))
+    monkeypatch.setitem(sys.modules, "isaacsim.asset.importer.urdf", fake_urdf_mod)
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(SimulationManager=type("SM", (), {
+            "get_active_physics_engine": classmethod(lambda cls: "physx"),
+        })))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
+        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+
+    import importlib
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    result = adapter.import_urdf(str(urdf_file), prim_path="/World/robot")
+    assert captured["config"]["urdf_path"] == str(urdf_file)
+    assert captured["config"]["dest_path"] == "/World/robot"
+    assert result == "/World/robot"

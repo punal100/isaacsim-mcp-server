@@ -793,7 +793,15 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Assets ─────────────────────────────────────────────
 
     def import_urdf(self, urdf_path: str, prim_path: str = "/World/robot", **kwargs) -> Any:
-        raise NotImplementedError("import_urdf: not yet implemented for V6")
+        import os
+
+        if not os.path.isfile(urdf_path):
+            raise FileNotFoundError(f"URDF file not found: {urdf_path}")
+        from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
+
+        config = URDFImporterConfig(urdf_path=urdf_path, dest_path=prim_path, **kwargs)
+        importer = URDFImporter(config)
+        return importer.import_urdf()
 
     # ── Simulation ─────────────────────────────────────────
 
