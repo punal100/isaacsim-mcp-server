@@ -693,7 +693,18 @@ class IsaacAdapterV6(IsaacAdapterBase):
         roughness: float = 0.5,
         metallic: float = 0.0,
     ) -> Any:
-        raise NotImplementedError("create_pbr_material: not yet implemented for V6")
+        from pxr import Gf, Sdf, UsdShade
+
+        stage = self.get_stage()
+        material = UsdShade.Material.Define(stage, prim_path)
+        shader = UsdShade.Shader.Define(stage, f"{prim_path}/Shader")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
+        if color:
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color[:3]))
+        material.CreateSurfaceOutput().ConnectToSource(shader.CreateOutput("surface", Sdf.ValueTypeNames.Token))
+        return material
 
     def create_physics_material(
         self,
@@ -702,10 +713,22 @@ class IsaacAdapterV6(IsaacAdapterBase):
         dynamic_friction: float = 0.5,
         restitution: float = 0.0,
     ) -> Any:
-        raise NotImplementedError("create_physics_material: not yet implemented for V6")
+        from pxr import UsdPhysics
+
+        stage = self.get_stage()
+        material = UsdPhysics.MaterialAPI.Apply(stage.DefinePrim(prim_path))
+        material.CreateStaticFrictionAttr(static_friction)
+        material.CreateDynamicFrictionAttr(dynamic_friction)
+        material.CreateRestitutionAttr(restitution)
+        return material
 
     def apply_material(self, material_path: str, target_prim_path: str) -> None:
-        raise NotImplementedError("apply_material: not yet implemented for V6")
+        from pxr import UsdShade
+
+        stage = self.get_stage()
+        material = UsdShade.Material(stage.GetPrimAtPath(material_path))
+        target = stage.GetPrimAtPath(target_prim_path)
+        UsdShade.MaterialBindingAPI(target).Bind(material)
 
     # ── Lighting ───────────────────────────────────────────
 
@@ -717,15 +740,55 @@ class IsaacAdapterV6(IsaacAdapterBase):
         color: Optional[Sequence[float]] = None,
         **kwargs,
     ) -> Any:
-        raise NotImplementedError("create_light: not yet implemented for V6")
+        from pxr import Gf, UsdLux
+
+        stage = self.get_stage()
+        light_classes = {
+            "DistantLight": UsdLux.DistantLight,
+            "DomeLight": UsdLux.DomeLight,
+            "SphereLight": UsdLux.SphereLight,
+            "RectLight": UsdLux.RectLight,
+            "DiskLight": UsdLux.DiskLight,
+            "CylinderLight": UsdLux.CylinderLight,
+        }
+        cls = light_classes.get(light_type)
+        if not cls:
+            raise ValueError(f"Unknown light type: {light_type}. Options: {list(light_classes.keys())}")
+        light = cls.Define(stage, prim_path)
+        light.CreateIntensityAttr(intensity)
+        if color:
+            light.CreateColorAttr(Gf.Vec3f(*color[:3]))
+        position = kwargs.get("position")
+        if position:
+            self.set_prim_transform(prim_path, position=position)
+        rotation = kwargs.get("rotation")
+        if rotation:
+            self.set_prim_transform(prim_path, rotation=rotation)
+        return light
 
     def modify_light(
-        self, prim_path: str, intensity: Optional[float] = None, color: Optional[Sequence[float]] = None
+        self,
+        prim_path: str,
+        intensity: Optional[float] = None,
+        color: Optional[Sequence[float]] = None,
     ) -> None:
-        raise NotImplementedError("modify_light: not yet implemented for V6")
+        from pxr import Gf
+
+        stage = self.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            raise ValueError(f"Light not found: {prim_path}")
+        if intensity is not None:
+            prim.GetAttribute("inputs:intensity").Set(intensity)
+        if color is not None:
+            prim.GetAttribute("inputs:color").Set(Gf.Vec3f(*color[:3]))
+
+    # ── Assets ─────────────────────────────────────────────
 
     def clone_prim(self, source_path: str, target_path: str) -> None:
-        raise NotImplementedError("clone_prim: not yet implemented for V6")
+        import omni.kit.commands
+
+        omni.kit.commands.execute("CopyPrim", path_from=source_path, path_to=target_path)
 
     # ── Assets ─────────────────────────────────────────────
 
