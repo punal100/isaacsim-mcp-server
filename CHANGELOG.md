@@ -5,6 +5,22 @@ All notable changes to the isaacsim-mcp-server project will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-13
+
+### Added
+- **Isaac Sim 6.0.0 support** — new `IsaacAdapterV6` built on `isaacsim.core.experimental.*` + `SimulationManager` + `isaacsim.sensors.experimental.rtx` + `isaacsim.asset.importer.urdf.URDFImporter`. Works under both the PhysX launcher (`isaac-sim.sh`) and the Newton launcher (`isaac-sim.newton.sh`).
+- **Engine auto-detection** — `adapters/__init__.py:get_adapter()` reads `isaacsim.core.version.get_version()` and selects V5 or V6 by major version. V6 reads `SimulationManager.get_active_physics_engine()` at construction time.
+- **`engine` and `isaacsim_version` fields on `get_simulation_state`** — MCP clients can see the active backend without poking at the runtime.
+
+### Changed
+- V6 URDF import uses `URDFImporter(URDFImporterConfig(...))` instead of the deprecated `URDFCreateImportConfig`/`URDFParseFile`/`URDFImportRobot` kit commands.
+- V6 physics state reads route through `SimulationManager.get_physics_simulation_view()` (the `omni.physics.tensors` view), replacing the V5 direct call to `omni.physx.get_physx_interface().get_rigidbody_transformation()` (which is unavailable under the Newton kit).
+- V6 sensor methods use `isaacsim.sensors.experimental.rtx.{RtxCamera,CameraSensor,Lidar,LidarSensor}` instead of the deprecated `isaacsim.sensors.camera.Camera` / `isaacsim.sensors.rtx.LidarRtx`.
+
+### Notes
+- 5.1.0 behavior unchanged — `IsaacAdapterV5` is untouched.
+- Hot-reload script (`scripts/dev_mcp_server.sh`) now reloads `adapters.v6` alongside `adapters.v5`.
+
 ## [0.5.2] - 2026-04-07
 
 ### Fixed
