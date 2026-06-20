@@ -132,3 +132,37 @@ def test_v6_create_prim_calls_experimental_define_prim(monkeypatch):
     result = adapter.create_prim("/World/Foo", "Xform")
     define_prim_mock.assert_called_once_with("/World/Foo", type_name="Xform")
     assert result == "prim-handle"
+
+
+def test_v6_ensure_physics_world_calls_simulation_manager(monkeypatch):
+    """V6._ensure_physics_world must use SimulationManager, not World."""
+    sm_calls = []
+
+    class _SM:
+        @classmethod
+        def get_active_physics_engine(cls):
+            return "newton"
+
+        @classmethod
+        def setup_simulation(cls, dt=None, device=None):
+            sm_calls.append(("setup_simulation", dt))
+
+        @classmethod
+        def initialize_physics(cls):
+            sm_calls.append(("initialize_physics",))
+
+    fake_sm_mod = types.ModuleType("isaacsim.core.simulation_manager")
+    fake_sm_mod.SimulationManager = _SM
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", fake_sm_mod)
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
+                        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+
+    import importlib
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    adapter._ensure_physics_world()
+    assert ("setup_simulation", 1.0 / 60.0) in sm_calls
+    assert ("initialize_physics",) in sm_calls
+    # And confirm we picked up the engine
+    assert adapter._engine == "newton"

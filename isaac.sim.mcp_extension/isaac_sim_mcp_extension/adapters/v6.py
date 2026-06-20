@@ -337,14 +337,30 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
     # ── Physics ────────────────────────────────────────────
 
+    def _ensure_physics_world(self) -> None:
+        """Initialise SimulationManager (idempotent under both PhysX and Newton)."""
+        from isaacsim.core.simulation_manager import SimulationManager
+
+        SimulationManager.setup_simulation(dt=1.0 / 60.0)
+        SimulationManager.initialize_physics()
+
     def create_world(self, **kwargs) -> Any:
-        raise NotImplementedError("create_world: not yet implemented for V6")
+        """V6 exposes SimulationManager (a class-level singleton) where V5 returned World()."""
+        from isaacsim.core.simulation_manager import SimulationManager
+
+        return SimulationManager
 
     def create_simulation_context(self, **kwargs) -> Any:
-        raise NotImplementedError("create_simulation_context: not yet implemented for V6")
+        from isaacsim.core.simulation_manager import SimulationManager
+
+        return SimulationManager
 
     def create_physics_scene(self, gravity: Optional[Sequence[float]] = None, scene_name: str = "PhysicsScene") -> str:
-        raise NotImplementedError("create_physics_scene: not yet implemented for V6")
+        import omni.kit.commands
+
+        scene_path = f"/World/{scene_name}"
+        omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+        return scene_path
 
     def get_physics_state(self, prim_path: str) -> Dict[str, Any]:
         raise NotImplementedError("get_physics_state: not yet implemented for V6")
