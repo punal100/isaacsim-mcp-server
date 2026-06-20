@@ -388,9 +388,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
         try:
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
-            positions_arr = wp.array([list(positions)], dtype=wp.float32)
+            positions_arr = wp.array(np.asarray([list(positions)], dtype=np.float32), dtype=wp.float32)
             if joint_indices is not None:
-                idx_arr = wp.array(list(joint_indices), dtype=wp.int32)
+                idx_arr = wp.array(np.asarray(joint_indices, dtype=np.int32), dtype=wp.int32)
                 art.set_dof_position_targets(positions_arr, indices=idx_arr)
             else:
                 art.set_dof_position_targets(positions_arr)

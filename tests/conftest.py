@@ -112,6 +112,15 @@ def _install_isaac_stubs() -> None:
     if "numpy" not in sys.modules:
         np_stub = _make_stub("numpy")
         np_stub.ndarray = type("ndarray", (), {})  # type: ignore[attr-defined]
+        # asarray is used by v6.py set_joint_positions to give wp.array an
+        # unambiguous shape descriptor.  The stub returns its first argument
+        # unchanged so the production call-path stays exercisable in tests.
+        np_stub.asarray = lambda *args, **kwargs: args[0]  # type: ignore[attr-defined]
+        # Dtype sentinels used as the `dtype` keyword argument in np.asarray
+        # calls.  The stub asarray ignores them, but the attribute lookup must
+        # not raise AttributeError.
+        np_stub.float32 = "float32"  # type: ignore[attr-defined]
+        np_stub.int32 = "int32"  # type: ignore[attr-defined]
         sys.modules["numpy"] = np_stub
 
     # ── pxr ──────────────────────────────────────────────────────────────────
