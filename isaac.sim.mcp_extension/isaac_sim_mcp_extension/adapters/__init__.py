@@ -34,8 +34,15 @@ def _detect_isaacsim_major_version() -> int:
     try:
         from isaacsim.core.version import get_version  # type: ignore
 
-        version_str = get_version()
-        match = re.match(r"^(\d+)\.", str(version_str))
+        # get_version() returns a string in 5.x ("5.1.0") and a tuple in 6.0
+        # (("6.0.0", "rc.59", "6", "0", "0", ...)). Pick the first element when
+        # given a sequence, otherwise treat as a string.
+        version_value = get_version()
+        if isinstance(version_value, (list, tuple)) and version_value:
+            version_str = str(version_value[0])
+        else:
+            version_str = str(version_value)
+        match = re.match(r"^(\d+)\.", version_str)
         if match:
             return int(match.group(1))
     except Exception:

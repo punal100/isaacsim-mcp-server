@@ -129,6 +129,13 @@ class SocketServer:
             client.close()
 
     def _dispatch_command(self, client: socket.socket, command: Dict[str, Any]) -> None:
+        # Handler runs as an asyncio Task on the kit main loop. Handlers
+        # MUST NOT call `omni.kit.app.update()` from inside this Task —
+        # doing so triggers `RuntimeError: Cannot enter into task <other>
+        # while another task <this handler> is being executed`, which
+        # eventually crashes kit when the rendering throttle / animation
+        # graph tasks get killed mid-flight. See `v6.step` for the
+        # SimulationManager.step replacement that avoids pumping the loop.
         async def execute_wrapper() -> None:
             try:
                 response = self._command_handler(command)

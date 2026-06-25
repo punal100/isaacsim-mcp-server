@@ -52,6 +52,40 @@ class IsaacAdapterV6(IsaacAdapterBase):
             self._isaacsim_version = str(get_version())
         except Exception:
             self._isaacsim_version = "unknown"
+        # Articulation cache keyed by prim_path. Tensor-backed Articulations
+        # bind to the current omni.physics.tensors SimulationView; that view
+        # is destroyed and recreated on every timeline stop→play cycle, so the
+        # cache is cleared on STOP. See _on_timeline_stop.
+        self._articulations: Dict[str, Any] = {}
+        # Sensor wrappers keyed by prim_path. Replicator annotators fill with
+        # data on every render tick — discarding and recreating the wrapper
+        # on each capture call (the 5.x pattern) means every call sees a
+        # freshly-registered annotator with no accumulated frames, so
+        # `get_data()` returns None. Long-lived wrappers let kit's normal
+        # update tick populate the annotator between MCP calls.
+        self._camera_sensors: Dict[str, Any] = {}
+        self._lidar_sensors: Dict[str, Any] = {}
+        self._timeline_stop_subscription = None
+        try:
+            import carb.eventdispatcher
+            import omni.timeline
+
+            def _on_timeline_stop(_event):
+                self._articulations.clear()
+                # Sensor wrappers hold annotator subscriptions; drop them on
+                # stop so a fresh play cycle re-registers cleanly.
+                self._camera_sensors.clear()
+                self._lidar_sensors.clear()
+
+            self._timeline_stop_subscription = (
+                carb.eventdispatcher.get_eventdispatcher().observe_event(
+                    event_name=omni.timeline.GLOBAL_EVENT_STOP,
+                    on_event=_on_timeline_stop,
+                    observer_name="isaac_sim_mcp.v6.cache_reset_on_stop",
+                )
+            )
+        except Exception:
+            pass
 
     # ── Scene ──────────────────────────────────────────────
 
@@ -288,7 +322,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
     def _new_articulation(self, prim_path: str) -> Any:
         from isaacsim.core.experimental.prims import Articulation
 
-        return Articulation(paths=[prim_path])
+        cached = self._articulations.get(prim_path)
+        if cached is not None:
+            return cached
+        art = Articulation(paths=[prim_path])
+        self._articulations[prim_path] = art
+        return art
 
     def discover_robots(self) -> Dict[str, Dict[str, str]]:
         import omni.client
@@ -330,6 +369,8 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return discovered
 
     def get_robot_joint_info(self, prim_path: str) -> Dict[str, Any]:
+        import traceback
+
         from pxr import Usd, UsdPhysics
 
         joint_names: List[str] = []
@@ -339,8 +380,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
             art = self._new_articulation(prim_path)
             joint_names = list(art.dof_names) if art.dof_names else []
             num_dof = int(art.num_dofs) if art.num_dofs else 0
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"v6.get_robot_joint_info: tensor API failed for {prim_path}: {e}")
+            traceback.print_exc()
 
         stage = self.get_stage()
         root_prim = stage.GetPrimAtPath(prim_path)
@@ -571,9 +613,19 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Physics ────────────────────────────────────────────
 
     def _ensure_physics_world(self) -> None:
-        """Initialise SimulationManager (idempotent under both PhysX and Newton)."""
+        """Initialise SimulationManager (idempotent under both PhysX and Newton).
+
+        Cleans stale PhysicsScene references first — the SimulationManager
+        retains Python wrappers around scenes that may have been deleted via
+        clear_scene, and calling setup_simulation/initialize_physics against
+        them raises "Accessed invalid expired 'PhysicsScene' prim".
+        """
         from isaacsim.core.simulation_manager import SimulationManager
 
+        try:
+            SimulationManager._cleanup_stale_physics_scenes()
+        except Exception:
+            pass
         SimulationManager.setup_simulation(dt=1.0 / 60.0)
         SimulationManager.initialize_physics()
 
@@ -643,46 +695,69 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Sensors ────────────────────────────────────────────
 
     def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
-        from isaacsim.sensors.experimental.rtx import RtxCamera
+        # 6.0 RtxCamera takes a single `path: str` — the 5.x batched
+        # (`prim_paths=[...], resolutions=[...]`) signature was removed.
+        # Also stand up the CameraSensor runtime + RGB annotator now so kit's
+        # background render ticks start filling the annotator immediately;
+        # later capture_image calls read accumulated frames from the cache.
+        from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
 
-        return RtxCamera(prim_paths=[prim_path], resolutions=[resolution])
+        camera = RtxCamera(path=prim_path)
+        # CameraSensor expects (height, width). Adapter callers historically
+        # pass (width, height) — translate so the cached resolution is sane.
+        h, w = (resolution[1], resolution[0]) if len(resolution) == 2 else (720, 1280)
+        self._camera_sensors[prim_path] = CameraSensor(
+            path=prim_path, resolution=(h, w), annotators=["rgb"]
+        )
+        return camera
 
     def capture_camera_image(self, prim_path: str) -> np.ndarray:
+        # Reuse the wrapper cached by create_camera. Building a fresh
+        # CameraSensor on every call re-registers the annotator with the
+        # render pipeline and discards any frames produced since the prim
+        # was created, so `get_data` returns None — that was the root cause
+        # of the "empty data" symptom. With a long-lived wrapper, kit's
+        # background update tick fills the annotator between MCP commands
+        # and get_data returns the latest rendered frame.
         from isaacsim.sensors.experimental.rtx import CameraSensor
 
-        sensor = CameraSensor(prim_paths=[prim_path])
-        sensor.attach_annotators(["rgb"])
-        try:
-            import omni.kit.app
-
-            omni.kit.app.get_app().update()
-        except Exception:
-            pass
-        data = sensor.get_annotator_data("rgb")
-        if isinstance(data, list):
-            data = data[0]
-        return np.asarray(data)
+        sensor = self._camera_sensors.get(prim_path)
+        if sensor is None:
+            sensor = CameraSensor(path=prim_path, resolution=(720, 1280), annotators=["rgb"])
+            self._camera_sensors[prim_path] = sensor
+        data, _info = sensor.get_data("rgb")
+        if data is None:
+            return np.zeros((0,), dtype=np.uint8)
+        return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
 
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
-        from isaacsim.sensors.experimental.rtx import Lidar
+        # 6.0 Lidar takes a single `path: str`. Hardware preset (formerly the
+        # `config` arg) is now set through schema attributes after creation;
+        # the bare constructor produces a generic OmniLidar prim. As with
+        # create_camera, also cache a LidarSensor wrapper so its annotator
+        # starts producing data on kit's regular render tick.
+        from isaacsim.sensors.experimental.rtx import Lidar, LidarSensor
 
-        return Lidar(prim_paths=[prim_path], configs=[config or "Example_Rotary"])
+        lidar = Lidar(path=prim_path)
+        self._lidar_sensors[prim_path] = LidarSensor(
+            path=prim_path, annotators=["generic-model-output"]
+        )
+        return lidar
 
     def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:
+        # 6.0 LidarSensor uses the unified "generic-model-output" annotator;
+        # the 5.x `RtxSensorCpu+IsaacComputeRTXLidarPointCloud` chain is gone.
+        # See `capture_camera_image` for the caching rationale.
         from isaacsim.sensors.experimental.rtx import LidarSensor
 
-        sensor = LidarSensor(prim_paths=[prim_path])
-        sensor.attach_annotators(["RtxSensorCpu" + "IsaacComputeRTXLidarPointCloud"])
-        try:
-            import omni.kit.app
-
-            omni.kit.app.get_app().update()
-        except Exception:
-            pass
-        data = sensor.get_annotator_data("RtxSensorCpu" + "IsaacComputeRTXLidarPointCloud")
-        if isinstance(data, list):
-            data = data[0]
-        return np.asarray(data.get("data") if isinstance(data, dict) else data)
+        sensor = self._lidar_sensors.get(prim_path)
+        if sensor is None:
+            sensor = LidarSensor(path=prim_path, annotators=["generic-model-output"])
+            self._lidar_sensors[prim_path] = sensor
+        data, info = sensor.get_data("generic-model-output")
+        if data is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
 
     # ── Materials ──────────────────────────────────────────
 
@@ -793,15 +868,24 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # ── Assets ─────────────────────────────────────────────
 
     def import_urdf(self, urdf_path: str, prim_path: str = "/World/robot", **kwargs) -> Any:
+        # 6.0 splits URDF import into two steps:
+        #   1) URDFImporter.import_urdf() converts the .urdf to a .usd on disk
+        #      (the `dest_path` kwarg from 5.x is gone — output dir is chosen
+        #      via `usd_path` on the config, defaulting to the URDF's directory)
+        #   2) the caller references that .usd into the live stage
         import os
+        import tempfile
 
         if not os.path.isfile(urdf_path):
             raise FileNotFoundError(f"URDF file not found: {urdf_path}")
         from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
 
-        config = URDFImporterConfig(urdf_path=urdf_path, dest_path=prim_path, **kwargs)
+        usd_out_dir = kwargs.pop("usd_path", None) or tempfile.mkdtemp(prefix="urdf_import_")
+        config = URDFImporterConfig(urdf_path=urdf_path, usd_path=usd_out_dir, **kwargs)
         importer = URDFImporter(config)
-        return importer.import_urdf()
+        usd_path = importer.import_urdf()
+        # Bring the generated USD into the live stage at the requested prim path
+        return self.add_reference_to_stage(usd_path, prim_path)
 
     # ── Simulation ─────────────────────────────────────────
 
@@ -827,10 +911,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
         observe_prims: Optional[List[str]] = None,
         observe_joints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        import omni.kit.app
+        # SimulationManager.step pumps only the physics pipeline (no asyncio
+        # event-loop reentry), which avoids the "Cannot enter into task" errors
+        # that omni.kit.app.update() triggers when called from inside the MCP
+        # dispatch coroutine on Kit 107 (Isaac Sim 6.0).
+        from isaacsim.core.simulation_manager import SimulationManager
 
-        for _ in range(num_steps):
-            omni.kit.app.get_app().update()
+        self._ensure_physics_world()
+        SimulationManager.step(steps=num_steps)
 
         result: Dict[str, Any] = {"stepped": num_steps}
 
