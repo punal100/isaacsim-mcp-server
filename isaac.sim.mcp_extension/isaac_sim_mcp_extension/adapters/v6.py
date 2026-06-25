@@ -179,13 +179,28 @@ class IsaacAdapterV6(IsaacAdapterBase):
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
         xformable = UsdGeom.Xformable(prim)
-        xformable.ClearXformOpOrder()
+        # Update existing ops in place; only add an op when the caller
+        # supplies a value AND the prim doesn't already have that op.
+        # ClearXformOpOrder() (the old behaviour) silently reset any axis
+        # the caller didn't pass to identity. AddTranslateOp() raises if
+        # the op is already in xformOpOrder, so we can't just call it
+        # again — look it up first.
+        existing = {op.GetName(): op for op in xformable.GetOrderedXformOps()}
         if position is not None:
-            xformable.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*position))
+            op = existing.get("xformOp:translate") or xformable.AddTranslateOp(
+                precision=UsdGeom.XformOp.PrecisionDouble
+            )
+            op.Set(Gf.Vec3d(*position))
         if rotation is not None:
-            xformable.AddRotateXYZOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*rotation))
+            op = existing.get("xformOp:rotateXYZ") or xformable.AddRotateXYZOp(
+                precision=UsdGeom.XformOp.PrecisionDouble
+            )
+            op.Set(Gf.Vec3d(*rotation))
         if scale is not None:
-            xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*scale))
+            op = existing.get("xformOp:scale") or xformable.AddScaleOp(
+                precision=UsdGeom.XformOp.PrecisionDouble
+            )
+            op.Set(Gf.Vec3d(*scale))
 
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
         from pxr import UsdGeom

@@ -40,24 +40,29 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        size: Optional[float] = None,
         color: Optional[List[float]] = None,
         physics_enabled: bool = False,
         prim_path: Optional[str] = None,
     ) -> str:
         """Create a primitive object (Cube, Sphere, Cylinder, Cone, Capsule, Plane).
 
-        The scale parameter multiplies the primitive's default size. For example,
-        a Cube has default size 2.0, so scale=[0.5, 0.5, 0.5] creates a 1.0m cube.
+        By default the object comes out **1m** along its longest axis — pass
+        `size` to set a different target. For non-uniform shapes, pass `scale`
+        directly to control each axis. If both are given, `scale` wins.
 
         Returns prim_path, actual_size [x, y, z] in meters, and bounding_box
-        (min/max corners in world coordinates) so you can accurately place other
-        objects relative to this one (e.g. placing a cube on top of a table).
+        (min/max corners in world coordinates) so you can accurately place
+        other objects relative to this one.
 
         Args:
             object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane.
             position: [x, y, z] world position.
             rotation: [rx, ry, rz] rotation in degrees.
-            scale: [sx, sy, sz] scale factors.
+            scale: [sx, sy, sz] explicit scale factors. Overrides `size`.
+            size: Target size in meters (default 1.0). Computes a uniform scale
+                from the primitive's USD default dimension. Ignored if `scale`
+                is also provided.
             color: [r, g, b] color values (0-1).
             physics_enabled: Enable physics on this object.
             prim_path: Custom prim path. Auto-generated if not provided.
@@ -71,6 +76,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
                 params["rotation"] = rotation
             if scale:
                 params["scale"] = scale
+            if size is not None:
+                params["size"] = size
             if color:
                 params["color"] = color
             if prim_path:

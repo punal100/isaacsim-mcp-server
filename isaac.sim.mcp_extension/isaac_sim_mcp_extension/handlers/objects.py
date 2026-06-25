@@ -29,6 +29,20 @@ from typing import Any, Dict, Optional, Sequence
 
 from ..adapters.base import IsaacAdapterBase
 
+# USD primitive default dimensions in meters. Used to translate the friendly
+# `size` parameter (target size in meters) into the scale factor needed to
+# produce an object of that size. Without this, naive callers get the USD
+# defaults — a 2m³ Cube, a 2m-diameter Sphere — which are surprising next
+# to a typical 1.2m-tall robot.
+_USD_DEFAULT_SIZE_M: Dict[str, float] = {
+    "Cube": 2.0,      # UsdGeom.Cube default size = 2
+    "Sphere": 2.0,    # UsdGeom.Sphere default radius = 1 → diameter 2
+    "Cylinder": 2.0,  # UsdGeom.Cylinder default height = 2
+    "Cone": 2.0,      # UsdGeom.Cone default height = 2
+    "Capsule": 2.0,   # UsdGeom.Capsule height=1 + 2*radius(0.5) = 2 end-to-end
+    "Plane": 1.0,     # UsdGeomPlane default width/length = 1
+}
+
 
 def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["objects.create"] = lambda **p: create(adapter, **p)
@@ -43,6 +57,7 @@ def create(
     position: Optional[Sequence[float]] = None,
     rotation: Optional[Sequence[float]] = None,
     scale: Optional[Sequence[float]] = None,
+    size: Optional[float] = None,
     color: Optional[Sequence[float]] = None,
     physics_enabled: bool = False,
     prim_path: Optional[str] = None,
@@ -53,6 +68,16 @@ def create(
             count = len(list(stage.TraverseAll()))
             prim_path = f"/World/{object_type}_{count}"
         _prim = adapter.create_prim(prim_path, prim_type=object_type)
+
+        # When no scale was given, derive one from `size` (default 1m) so the
+        # object comes out at a sane size relative to a typical robot. If the
+        # caller passed an explicit scale, that wins — `size` is ignored.
+        if scale is None:
+            target_size = size if size is not None else 1.0
+            default_dim = _USD_DEFAULT_SIZE_M.get(object_type, 2.0)
+            factor = target_size / default_dim
+            scale = [factor, factor, factor]
+
         if position or rotation or scale:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation, scale=scale)
 
