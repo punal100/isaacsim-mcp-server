@@ -5,6 +5,21 @@ All notable changes to the isaacsim-mcp-server project will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed / Changed — tool hardening for agent use
+- step_simulation now fails loud on a running timeline and the debug loop is
+  documented as step-only (never play while debugging). (#1)
+- create_action_graph gains inline_script= one-step shortcut; the broken inline
+  example is removed. (#2)
+- reload_script recompiles Action-Graph ScriptNodes that reference the edited
+  file, instead of silently no-oping. (#3)
+- get_isaac_logs: eager listener, run-scoped (since_last_play default),
+  non-destructive default, and captures print() as [PRINT]. (#4/#5)
+- execute_script documents that it can silently disturb a live ScriptNode. (#6)
+- create_object documents that scale= is a raw native-size multiplier. (#7)
+- stop_simulation resets the scene to spawn state. (#8)
+
 ## [0.6.0] - 2026-06-13
 
 ### Added
