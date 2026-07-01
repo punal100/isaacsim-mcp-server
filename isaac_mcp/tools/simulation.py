@@ -68,13 +68,19 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def step_simulation(
         num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
     ) -> str:
-        """Step the simulation forward by N frames, then observe prim and joint states.
+        """Advance the simulation by exactly N physics frames on a FROZEN timeline.
 
-        This is the primary tool for debugging robot behavior. Use it instead of
-        play_simulation + sleep + execute_script. The observe parameters let you
-        inspect positions, velocities, and joint states in a single call.
+        step is self-contained: it initialises physics on first call and operates
+        on a paused/stopped timeline, so N is always exact and observations
+        correlate to a known frame count.
 
-        Typical debug loop:
+        Do NOT call play_simulation before or during the debug loop; step is for
+        a frozen timeline. If the timeline is already playing, step returns an
+        error (a free run cannot be counted frame-by-frame). Use play_simulation
+        ONLY for a final continuous run / ScriptNode-driven demo, never for
+        debugging.
+
+        Typical debug loop (no play):
           1. set_joint_positions to command the robot
           2. step_simulation with observe_prims and observe_joints
           3. get_joint_config if drives are not tracking correctly
@@ -144,9 +150,9 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
     @mcp.tool("get_simulation_state")
     def get_simulation_state() -> str:
-        """Get the current simulation state including timeline status (playing/stopped/paused),
-        simulation time, and physics dt. Call this to verify the simulation is running before
-        using step_simulation."""
+        """Get the current simulation state: timeline status (playing/stopped/paused),
+        simulation time, and physics dt. step_simulation does NOT require a running
+        timeline — do not play just to step."""
         try:
             conn = get_connection()
             result = conn.send_command("simulation.get_state")

@@ -75,8 +75,28 @@ def step(
     observe_joints: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     try:
+        # Fail loud: stepping is only valid on a frozen (paused/stopped)
+        # timeline. If a free run is active, N frames cannot be counted
+        # exactly, so refuse rather than silently race the play loop.
+        state = adapter.get_simulation_state()
+        timeline_state = state.get("timeline_state") if isinstance(state, dict) else None
+        if timeline_state == "playing":
+            return {
+                "status": "error",
+                "message": (
+                    "Cannot step while the simulation is running. A free-running "
+                    "timeline is active — call pause_simulation or stop_simulation "
+                    "first. Do not call play_simulation during the debug loop; "
+                    "step_simulation is for a frozen timeline."
+                ),
+            }
         result = adapter.step(num_steps=num_steps, observe_prims=observe_prims, observe_joints=observe_joints)
-        return {"status": "success", "message": f"Stepped {num_steps} frames", **result}
+        return {
+            "status": "success",
+            "message": f"Stepped {num_steps} frames",
+            "timeline_state": timeline_state,
+            **result,
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

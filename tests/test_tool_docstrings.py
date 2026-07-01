@@ -46,3 +46,20 @@ def test_create_object_documents_scale_multiplier():
     assert "2 m" in src or "2m" in src           # native size of Cube/Sphere/etc
     assert "scale=0.5" in src                     # worked example -> 1 m
     assert "size=" in src                         # steer to size= for absolute meters
+
+
+def test_step_simulation_docstring_forbids_play_first():
+    src = _read_tool_source("simulation.py")
+    assert "Do NOT call play_simulation" in src
+    assert "frozen" in src
+
+
+def test_get_simulation_state_drops_verify_running_claim():
+    src = _read_tool_source("simulation.py")
+    assert "verify the simulation is running before" not in src
+
+
+def test_server_instructions_debug_loop_is_step_only():
+    src = _read_server_source()
+    assert "step-only" in src
+    assert "never play" in src.lower() or "do not call play_simulation" in src.lower()

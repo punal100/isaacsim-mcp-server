@@ -70,12 +70,19 @@ Scripts/Action Graphs operate WITHIN frames (runtime-level): control loops, IK, 
 - create_robot: call list_available_robots first for exact keys (lowercase, no spaces, e.g. "frankafr3")
 - Always get_prim_info to query actual positions/sizes BEFORE writing controller scripts
 
-### Debug Loop
-step_simulation with observe_prims/observe_joints. If issues: get_joint_config, get_physics_state, get_isaac_logs.
-Do NOT use play_simulation + sleep + execute_script as a debug loop.
+### Debug Loop (step-only — never play)
+The debug loop is step-only: set_joint_positions + step_simulation with
+observe_prims/observe_joints on a FROZEN timeline. Do NOT call play_simulation
+while debugging — step errors if the timeline is already playing. If issues:
+get_joint_config, get_physics_state, get_isaac_logs.
+play_simulation is ONLY for a final continuous run / ScriptNode demo.
+Two separate debug modes: MCP loop = step on a frozen timeline (no graph);
+ScriptNode/Action-Graph = play + get_isaac_logs (graphs tick only while playing
+and cannot be stepped). Do not mix them.
 
 ### Controller Development
-Write .py file → reload_script → step_simulation to debug → edit & reload → play_simulation when ready.
+Write .py file → reload_script → step_simulation to debug → edit & reload →
+play_simulation only for the final continuous run.
 
 ### ScriptNode (Action Graph)
 create_action_graph(script_file="/path/to/controller.py") wires OnPlaybackTick → ScriptNode.
