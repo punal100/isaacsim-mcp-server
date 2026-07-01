@@ -266,15 +266,28 @@ def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
             captured["importer_config"] = config
 
         def import_urdf(self, config=None):
-            return "/World/robot"
+            # 6.0: URDFImporter.import_urdf() converts the .urdf to a .usd on
+            # disk and returns that generated USD path.
+            return "/generated/robot.usd"
+
+    def _fake_add_reference_to_stage(usd_path, prim_path):
+        captured["add_reference"] = (usd_path, prim_path)
+        return prim_path
 
     fake_urdf_mod = types.ModuleType("isaacsim.asset.importer.urdf")
     fake_urdf_mod.URDFImporter = _Importer
     fake_urdf_mod.URDFImporterConfig = _Config
+    fake_stage_mod = types.ModuleType("isaacsim.core.experimental.utils.stage")
+    fake_stage_mod.add_reference_to_stage = _fake_add_reference_to_stage
     monkeypatch.setitem(sys.modules, "isaacsim", types.ModuleType("isaacsim"))
     monkeypatch.setitem(sys.modules, "isaacsim.asset", types.ModuleType("isaacsim.asset"))
     monkeypatch.setitem(sys.modules, "isaacsim.asset.importer", types.ModuleType("isaacsim.asset.importer"))
     monkeypatch.setitem(sys.modules, "isaacsim.asset.importer.urdf", fake_urdf_mod)
+    monkeypatch.setitem(sys.modules, "isaacsim.core", types.ModuleType("isaacsim.core"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental", types.ModuleType("isaacsim.core.experimental"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.utils",
+        types.ModuleType("isaacsim.core.experimental.utils"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.utils.stage", fake_stage_mod)
     monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
         types.SimpleNamespace(SimulationManager=type("SM", (), {
             "get_active_physics_engine": classmethod(lambda cls: "physx"),
@@ -287,6 +300,10 @@ def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     result = adapter.import_urdf(str(urdf_file), prim_path="/World/robot")
+    # 6.0 two-step API: config carries urdf_path + usd_path (the 5.x dest_path
+    # kwarg is gone), then the generated USD is referenced into the live stage.
     assert captured["config"]["urdf_path"] == str(urdf_file)
-    assert captured["config"]["dest_path"] == "/World/robot"
+    assert "usd_path" in captured["config"]
+    assert "dest_path" not in captured["config"]
+    assert captured["add_reference"] == ("/generated/robot.usd", "/World/robot")
     assert result == "/World/robot"
