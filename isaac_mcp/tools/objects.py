@@ -47,9 +47,15 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     ) -> str:
         """Create a primitive object (Cube, Sphere, Cylinder, Cone, Capsule, Plane).
 
-        By default the object comes out **1m** along its longest axis — pass
-        `size` to set a different target. For non-uniform shapes, pass `scale`
-        directly to control each axis. If both are given, `scale` wins.
+        Prefer `size` for absolute sizing: `size` is the target in METERS
+        (default 1.0), so `size=0.3` gives a 0.3 m object regardless of type.
+
+        `scale` is a RAW MULTIPLIER of the primitive's NATIVE size, not meters.
+        Native sizes: Cube/Sphere/Cylinder/Cone/Capsule = 2 m, Plane = 1 m.
+        So `scale=0.5` on a Cube -> 1 m, and `scale=[0.4,0.4,0.3]` -> a
+        0.8 x 0.8 x 0.6 m box (0.4 * 2 m), which surprises callers who expect
+        0.4 m. Use `scale` only for deliberate non-uniform shaping; otherwise
+        use `size`. If both are given, `scale` wins and `size` is ignored.
 
         Returns prim_path, actual_size [x, y, z] in meters, and bounding_box
         (min/max corners in world coordinates) so you can accurately place
@@ -59,10 +65,10 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane.
             position: [x, y, z] world position.
             rotation: [rx, ry, rz] rotation in degrees.
-            scale: [sx, sy, sz] explicit scale factors. Overrides `size`.
-            size: Target size in meters (default 1.0). Computes a uniform scale
-                from the primitive's USD default dimension. Ignored if `scale`
-                is also provided.
+            scale: [sx, sy, sz] RAW multiplier of the native size (2 m for most
+                prims, 1 m for Plane). NOT meters. Overrides `size`.
+            size: Target size in METERS (default 1.0). Absolute; independent of
+                the primitive's native size. Ignored if `scale` is provided.
             color: [r, g, b] color values (0-1).
             physics_enabled: Enable physics on this object.
             prim_path: Custom prim path. Auto-generated if not provided.
