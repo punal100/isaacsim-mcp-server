@@ -53,3 +53,23 @@ def test_inline_script_sets_script_and_disables_usepath():
     assert "inline_script" in src
     assert "inputs:script" in src
     assert "inputs:usePath" in src
+
+
+def test_force_recompile_helper_exists_and_is_reused():
+    tree = ast.parse(_handler_src())
+    func_names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert "force_recompile_scriptnode" in func_names
+    # edit_action_graph delegates to the shared helper rather than inlining it
+    assert _handler_src().count("force_recompile_scriptnode(") >= 2
+
+
+def test_reload_script_scans_scriptnodes_by_scriptpath():
+    for fname in ("v6.py", "v5.py"):
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
+            "isaac_sim_mcp_extension", "adapters", fname,
+        )
+        with open(path) as f:
+            src = f.read()
+        assert "inputs:scriptPath" in src            # reload matches nodes by their file
+        assert "force_recompile_scriptnode" in src   # and recompiles them

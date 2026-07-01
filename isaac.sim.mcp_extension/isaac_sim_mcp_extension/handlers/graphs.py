@@ -35,6 +35,29 @@ def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["graphs.edit_action_graph"] = lambda **p: edit_action_graph(adapter, **p)
 
 
+def force_recompile_scriptnode(graph, node) -> None:
+    """Force a ScriptNode to re-read and recompile its script.
+
+    Resets the USD state attribute and clears the ScriptNode's internal shared
+    caches so compute() detects a change even if a racing graph evaluation
+    re-set omni_initialized. Safe to call when the scriptnode extension is not
+    loaded (falls back to the attribute reset only).
+    """
+    import omni.graph.core as og
+
+    attr = node.get_attribute("state:omni_initialized")
+    if attr is not None and attr.is_valid():
+        og.Controller.set(attr, False)
+    try:
+        from omni.graph.scriptnode.ogn.OgnScriptNodeDatabase import OgnScriptNodeDatabase
+
+        shared = OgnScriptNodeDatabase.shared_internal_state(node)
+        shared.use_path = None
+        shared.script = None
+    except Exception:
+        pass
+
+
 def create_action_graph(
     adapter: IsaacAdapterBase,
     graph_path: str = "/World/ActionGraph",
@@ -272,25 +295,7 @@ def edit_action_graph(
                         node_path = f"{graph_path}/{node_name}"
                         node = graph.get_node(node_path)
                         if node is not None and node.is_valid():
-                            # 1. Reset the USD state attribute
-                            attr = node.get_attribute("state:omni_initialized")
-                            if attr is not None and attr.is_valid():
-                                og.Controller.set(attr, False)
-
-                            # 2. Clear ScriptNode internal caches so compute()
-                            #    detects a change even if omni_initialized
-                            #    was overwritten by a racing graph evaluation.
-                            try:
-                                from omni.graph.scriptnode.ogn.OgnScriptNodeDatabase import (
-                                    OgnScriptNodeDatabase,
-                                )
-
-                                shared = OgnScriptNodeDatabase.shared_internal_state(node)
-                                shared.use_path = None  # forces use_path mismatch check
-                                shared.script = None  # forces script content comparison
-                            except Exception:
-                                pass  # ScriptNode extension not loaded — fall back to attr reset only
-
+                            force_recompile_scriptnode(graph, node)
                             changes_made.append(f"auto-reset state:omni_initialized on {node_path}")
 
         # ── Add new connections ────────────────────────────────────

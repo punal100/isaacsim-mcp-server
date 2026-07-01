@@ -71,6 +71,12 @@ def test_stop_simulation_documents_reset():
     assert "reset" in src.lower()
 
 
+def test_reload_script_documents_scriptnode_mode():
+    src = _read_tool_source("simulation.py")
+    assert "ScriptNode" in src
+    assert "recompile" in src.lower()
+
+
 def test_create_action_graph_has_inline_script_param():
     import ast
     src = _read_tool_source("graphs.py")

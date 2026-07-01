@@ -41,8 +41,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
+import tempfile
 from typing import Any, Dict
 
 
@@ -211,6 +213,55 @@ def main() -> int:
             "resolution": [320, 240],
         })
         results.append(check("sensors.create_camera (experimental.rtx.RtxCamera)", resp))
+
+    # 7. reload_script recompiles a matching Action-Graph ScriptNode (manual,
+    #    exercises the ScriptNode-aware path added for the reload_script fix).
+    #    Writes a controller file, wires it into an action graph as a
+    #    ScriptNode, edits the file on disk, then calls reload_script and
+    #    checks the response reports recompiled_nodes instead of re-exec'ing
+    #    the file standalone.
+    script_path = os.path.join(tempfile.gettempdir(), "smoke_test_scriptnode_controller.py")
+    with open(script_path, "w") as f:
+        f.write(
+            "def setup(db):\n"
+            "    pass\n\n"
+            "def compute(db):\n"
+            "    return True\n"
+        )
+
+    resp = send(args.host, args.port, "graphs.create_action_graph", {
+        "graph_path": "/World/SmokeActionGraph",
+        "script_file": script_path,
+    })
+    results.append(check("graphs.create_action_graph (script_file ScriptNode)", resp))
+
+    resp = send(args.host, args.port, "simulation.play", {})
+    results.append(check("simulation.play (scriptnode reload test)", resp))
+
+    # Edit the file on disk — this is the change reload_script must pick up.
+    with open(script_path, "w") as f:
+        f.write(
+            "def setup(db):\n"
+            "    pass\n\n"
+            "def compute(db):\n"
+            "    # edited on disk to verify reload_script recompiles this node\n"
+            "    return True\n"
+        )
+
+    resp = send(args.host, args.port, "simulation.reload_script", {"file_path": script_path})
+    def _recompiled(r: Dict[str, Any]) -> tuple[bool, str]:
+        if "recompiled_nodes" not in r:
+            return False, "response missing 'recompiled_nodes' — fell back to standalone re-exec"
+        if not r["recompiled_nodes"]:
+            return False, "recompiled_nodes was empty — no ScriptNode matched"
+        return True, ""
+    results.append(check(
+        "simulation.reload_script recompiles the ScriptNode (not standalone re-exec)",
+        resp, _recompiled,
+    ))
+
+    resp = send(args.host, args.port, "simulation.stop", {})
+    results.append(check("simulation.stop (scriptnode reload test)", resp))
 
     print()
     passed = sum(1 for r in results if r)

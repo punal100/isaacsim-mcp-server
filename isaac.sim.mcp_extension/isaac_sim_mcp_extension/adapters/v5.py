@@ -36,6 +36,40 @@ if TYPE_CHECKING:
     from pxr import Usd
 
 
+def _recompile_scriptnodes_for_file(abs_path: str) -> list:
+    """Recompile every Action-Graph ScriptNode whose scriptPath matches abs_path.
+
+    Returns the list of recompiled node paths (empty if none matched).
+    """
+    import os
+
+    try:
+        import omni.graph.core as og
+
+        from ..handlers.graphs import force_recompile_scriptnode
+    except Exception:
+        return []
+
+    recompiled = []
+    try:
+        graphs = og.get_all_graphs() if hasattr(og, "get_all_graphs") else []
+    except Exception:
+        graphs = []
+    for graph in graphs:
+        try:
+            for node in graph.get_nodes():
+                attr = node.get_attribute("inputs:scriptPath")
+                if attr is None or not attr.is_valid():
+                    continue
+                val = attr.get()
+                if val and os.path.abspath(str(val)) == abs_path:
+                    force_recompile_scriptnode(graph, node)
+                    recompiled.append(node.get_prim_path())
+        except Exception:
+            continue
+    return recompiled
+
+
 class IsaacAdapterV5(IsaacAdapterBase):
     """Adapter for Isaac Sim 5.1.0 (isaacsim.* namespace)."""
 
@@ -1047,6 +1081,18 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
         # Clean up previous exec() namespace for this file (unsubscribe orphaned callbacks)
         abs_path = os.path.abspath(file_path)
+
+        # ScriptNode-aware reload: if any Action-Graph ScriptNode references this
+        # file via inputs:scriptPath, force it to recompile (the standalone
+        # re-exec below would not touch the running graph node).
+        recompiled = _recompile_scriptnodes_for_file(abs_path)
+        if recompiled:
+            return {
+                "status": "success",
+                "message": f"Recompiled ScriptNode(s) referencing {os.path.basename(file_path)}",
+                "recompiled_nodes": recompiled,
+            }
+
         old_ns = self._exec_namespaces.get(abs_path)
         if old_ns:
             for key, val in old_ns.items():

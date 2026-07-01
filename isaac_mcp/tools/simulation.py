@@ -235,13 +235,20 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
     @mcp.tool("reload_script")
     def reload_script(file_path: str, module_name: Optional[str] = None) -> str:
-        """Load a Python controller or module into Isaac Sim from a file on disk.
+        """Reload a Python controller from a file on disk.
 
-        Use this instead of execute_script for persistent controllers, state machines,
-        or any code longer than ~20 lines. Workflow:
-          1. Write the controller as a .py file
-          2. reload_script to load it into Isaac Sim
-          3. step_simulation to debug the behavior
+        Two modes, chosen automatically:
+        - If any Action-Graph ScriptNode references this file (inputs:scriptPath),
+          those ScriptNodes are force-recompiled so your on-disk edits take effect
+          on the running graph. This is how you iterate on a ScriptNode controller.
+        - Otherwise the file is (re-)executed as a standalone controller, the way
+          you would use execute_script for code longer than ~20 lines.
+
+        Workflow:
+          1. Write the controller as a .py file (attach via create_action_graph
+             script_file=... for ScriptNode use)
+          2. reload_script to load / recompile it
+          3. step_simulation to debug (frozen timeline) or play for a ScriptNode demo
           4. Edit the file and reload_script again to iterate
 
         The file's directory is auto-added to sys.path.
