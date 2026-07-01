@@ -69,3 +69,16 @@ def test_stop_simulation_documents_reset():
     src = _read_tool_source("simulation.py")
     assert "spawn pose" in src
     assert "reset" in src.lower()
+
+
+def test_create_action_graph_has_inline_script_param():
+    import ast
+    src = _read_tool_source("graphs.py")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "create_action_graph":
+            arg_names = {a.arg for a in node.args.args} | {a.arg for a in node.args.kwonlyargs}
+            assert "inline_script" in arg_names
+            assert "script_file" in src and "recommended" in src.lower()
+            return
+    raise AssertionError("create_action_graph tool not found")

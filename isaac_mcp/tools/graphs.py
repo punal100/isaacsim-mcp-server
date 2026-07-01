@@ -42,6 +42,7 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         values: Optional[List[Dict[str, object]]] = None,
         evaluator: str = "push",
         script_file: Optional[str] = None,
+        inline_script: Optional[str] = None,
     ) -> str:
         """Create and wire an OmniGraph Action Graph.
 
@@ -64,15 +65,21 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
                 When provided, automatically creates OnPlaybackTick → ScriptNode nodes,
                 wires them, and attaches the script file (sets usePath + scriptPath).
                 The nodes and connections parameters are ignored when script_file is set.
+                RECOMMENDED for anything you will iterate on — edit the file and
+                reload_script "just works", with the better reload story.
+            inline_script: Convenience shortcut — inline Python (must define
+                setup(db)/compute(db)). Auto-creates OnPlaybackTick → ScriptNode,
+                wires them, and sets the script inline (usePath=False). For small,
+                static graphs. For anything you will iterate on, prefer
+                script_file — it has the better reload story (edit the file +
+                reload_script "just works"; inline edits need edit_action_graph).
 
-        Example (inline script):
+        Example (inline script — one-step):
             create_action_graph(
-                values=[
-                    {"attr": "ScriptNode.inputs:script", "value": "def compute(db): ..."}
-                ]
+                inline_script="def setup(db): pass\\ndef compute(db): return True"
             )
 
-        Example (script file — one-step):
+        Example (script file — one-step, recommended for iteration):
             create_action_graph(
                 script_file="/path/to/controller.py"
             )
@@ -82,6 +89,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             params: Dict[str, object] = {"graph_path": graph_path, "evaluator": evaluator}
             if script_file is not None:
                 params["script_file"] = script_file
+            elif inline_script is not None:
+                params["inline_script"] = inline_script
             else:
                 if nodes is not None:
                     params["nodes"] = nodes
