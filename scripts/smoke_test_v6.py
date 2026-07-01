@@ -150,6 +150,56 @@ def main() -> int:
     resp = send(args.host, args.port, "simulation.stop", {})
     results.append(check("simulation.stop", resp))
 
+    # 4b. stop_simulation must reset the scene to spawn state: create a cube
+    #     above the ground, play, step until it falls, stop, and verify the
+    #     cube's world Z is back at its spawn value (not the fallen value).
+    send(args.host, args.port, "scene.clear", {})
+    resp = send(args.host, args.port, "simulation.set_physics", {"gravity": [0.0, 0.0, -9.81]})
+    results.append(check("simulation.set_physics (reset test)", resp))
+
+    spawn_z = 2.0
+    resp = send(args.host, args.port, "objects.create", {
+        "object_type": "cube",
+        "prim_path": "/World/ResetCube",
+        "size": 0.5,
+        "position": [0.0, 0.0, spawn_z],
+    })
+    results.append(check("objects.create cube above ground (reset test)", resp))
+
+    resp = send(args.host, args.port, "simulation.play", {})
+    results.append(check("simulation.play (reset test)", resp))
+
+    resp = send(args.host, args.port, "simulation.step", {
+        "num_steps": 60,
+        "observe_prims": ["/World/ResetCube"],
+    })
+    def _fell(r: Dict[str, Any]) -> tuple[bool, str]:
+        states = r.get("prim_states") or []
+        if not states or "position" not in states[0]:
+            return False, "no position observed for cube"
+        z = states[0]["position"][2]
+        if z >= spawn_z:
+            return False, f"cube did not fall: z={z}"
+        return True, ""
+    results.append(check("simulation.step lets cube fall (reset test)", resp, _fell))
+
+    resp = send(args.host, args.port, "simulation.stop", {})
+    results.append(check("simulation.stop (reset test)", resp))
+
+    resp = send(args.host, args.port, "scene.get_prim_info", {"prim_path": "/World/ResetCube"})
+    def _back_at_spawn(r: Dict[str, Any]) -> tuple[bool, str]:
+        position = r.get("position")
+        if not position:
+            return False, "no position in prim_info"
+        z = position[2]
+        if abs(z - spawn_z) > 1e-3:
+            return False, f"expected z~={spawn_z} after stop, got z={z}"
+        return True, ""
+    results.append(check(
+        "scene.get_prim_info shows cube back at spawn Z after stop_simulation",
+        resp, _back_at_spawn,
+    ))
+
     # 5. URDF import round-trip is skipped because it requires a local URDF
     #    file in a known location — verified separately in the demo.
 

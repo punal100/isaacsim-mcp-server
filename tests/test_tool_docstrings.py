@@ -63,3 +63,9 @@ def test_server_instructions_debug_loop_is_step_only():
     src = _read_server_source()
     assert "step-only" in src
     assert "never play" in src.lower() or "do not call play_simulation" in src.lower()
+
+
+def test_stop_simulation_documents_reset():
+    src = _read_tool_source("simulation.py")
+    assert "spawn pose" in src
+    assert "reset" in src.lower()

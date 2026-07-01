@@ -56,7 +56,11 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
     @mcp.tool("stop_simulation")
     def stop_simulation() -> str:
-        """Stop the physics simulation."""
+        """Stop the physics simulation and reset to spawn state.
+
+        Resets articulations and rigid bodies to their spawn pose (the state
+        captured at first Play), like the Isaac UI Stop button. Call this to
+        return the scene to a clean starting point before another run."""
         try:
             conn = get_connection()
             result = conn.send_command("simulation.stop")

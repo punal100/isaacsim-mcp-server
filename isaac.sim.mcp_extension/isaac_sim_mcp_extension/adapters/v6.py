@@ -919,6 +919,15 @@ class IsaacAdapterV6(IsaacAdapterBase):
         import omni.timeline
 
         omni.timeline.get_timeline_interface().stop()
+        # Restore articulations / rigid bodies to their spawn pose (the state
+        # captured at first Play), matching the Isaac UI Stop button. Guarded so
+        # a scene with no initialised physics still stops cleanly.
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            SimulationManager.reset_simulation()
+        except Exception:
+            pass
 
     def step(
         self,
