@@ -65,8 +65,9 @@ class MCPExtension(omni.ext.IExt):
         # and mark a run boundary on each timeline Play so get_isaac_logs can
         # scope to the current run.
         try:
-            from .handlers.simulation import _ensure_log_listener, mark_play_boundary
             import omni.timeline
+
+            from .handlers.simulation import _ensure_log_listener, mark_play_boundary
 
             _ensure_log_listener()
             self._play_sub = (
