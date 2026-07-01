@@ -77,6 +77,21 @@ def test_reload_script_documents_scriptnode_mode():
     assert "recompile" in src.lower()
 
 
+def test_get_isaac_logs_has_since_last_play_and_nondestructive_default():
+    import ast
+    src = _read_tool_source("simulation.py")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "get_isaac_logs":
+            defaults = {a.arg: d for a, d in zip(node.args.args[-len(node.args.defaults):], node.args.defaults)}
+            assert "since_last_play" in {a.arg for a in node.args.args}
+            # clear defaults to False (non-destructive)
+            clear_default = defaults.get("clear")
+            assert isinstance(clear_default, ast.Constant) and clear_default.value is False
+            return
+    raise AssertionError("get_isaac_logs tool not found")
+
+
 def test_create_action_graph_has_inline_script_param():
     import ast
     src = _read_tool_source("graphs.py")

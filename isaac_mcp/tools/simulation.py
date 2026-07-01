@@ -134,20 +134,29 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("get_isaac_logs")
-    def get_isaac_logs(clear: bool = True, count: int = 100) -> str:
-        """Diagnostic tool: get recent warnings and errors from the Isaac Sim console.
+    def get_isaac_logs(clear: bool = False, count: int = 100, since_last_play: bool = True) -> str:
+        """Diagnostic tool: recent WARN/ERROR logs plus captured print() output.
 
-        Call this after any tool returns an error, after simulation behavior is unexpected,
-        or after execute_script / reload_script fails. Helps diagnose physics warnings,
-        collision issues, and script errors that are not surfaced in tool responses.
+        Captures carb.log_*/omni.log WARN+ERROR and stdout from execute_script /
+        reload_script (tagged [PRINT]). Plain print() outside those captured
+        contexts may not appear.
+
+        Defaults are agent-friendly: non-destructive (clear=False) and scoped to
+        the current run (since_last_play=True) so you see logs from what you just
+        did, not stale entries from previous runs.
 
         Args:
-            clear: Clear the log buffer after reading. Default True.
+            clear: If True, empty the buffer after reading. Default False.
             count: Maximum number of log entries to return.
+            since_last_play: If True (default), return only entries since the last
+                timeline Play. Set False for the full buffer.
         """
         try:
             conn = get_connection()
-            result = conn.send_command("simulation.get_logs", {"clear": clear, "count": count})
+            result = conn.send_command(
+                "simulation.get_logs",
+                {"clear": clear, "count": count, "since_last_play": since_last_play},
+            )
             return json.dumps(result, indent=2)
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)})

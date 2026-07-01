@@ -49,6 +49,7 @@ class MCPExtension(omni.ext.IExt):
         self._registry: Dict[str, Any] = {}
         self._adapter = None
         self._server: SocketServer | None = None
+        self._play_sub = None
 
     def on_startup(self, ext_id: str) -> None:
         print("trigger  on_startup for: ", ext_id)
@@ -60,6 +61,25 @@ class MCPExtension(omni.ext.IExt):
         register_all_handlers(self._registry, self._adapter)
         print(f"Registered {len(self._registry)} command handlers")
 
+        # Capture logs from extension load so early diagnostics are not missed,
+        # and mark a run boundary on each timeline Play so get_isaac_logs can
+        # scope to the current run.
+        try:
+            from .handlers.simulation import _ensure_log_listener, mark_play_boundary
+            import omni.timeline
+
+            _ensure_log_listener()
+            self._play_sub = (
+                omni.timeline.get_timeline_interface()
+                .get_timeline_event_stream()
+                .create_subscription_to_pop_by_type(
+                    int(omni.timeline.TimelineEventType.PLAY),
+                    lambda _e: mark_play_boundary(),
+                )
+            )
+        except Exception as _e:
+            print("log listener / play-boundary setup skipped:", _e)
+
         self._server = SocketServer(host, port, self._execute_command)
         self._server.start()
 
@@ -67,6 +87,7 @@ class MCPExtension(omni.ext.IExt):
         print("trigger  on_shutdown for: ", self.ext_id)
         if self._server:
             self._server.stop()
+        self._play_sub = None
         self._registry.clear()
         gc.collect()
 

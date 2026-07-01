@@ -1048,18 +1048,36 @@ class IsaacAdapterV5(IsaacAdapterBase):
         try:
             self._ensure_physics_world()
             exec(code, local_ns)
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "success",
                 "message": "Script executed successfully",
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         except Exception as e:
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "error",
                 "message": str(e),
                 "traceback": traceback.format_exc(),
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         finally:
@@ -1140,18 +1158,36 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 self._exec_namespaces[abs_path] = local_ns
                 msg = f"Script '{os.path.basename(file_path)}' executed successfully"
 
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "success",
                 "message": msg,
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         except Exception as e:
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "error",
                 "message": str(e),
                 "traceback": traceback.format_exc(),
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         finally:

@@ -171,11 +171,35 @@ def reload_script_handler(
 
 _log_buffer: list = []
 _log_listener_active: bool = False
+_play_boundary: int = 0
 _MAX_LOG_BUFFER = 500
 
 
+def append_log(entry: str) -> None:
+    """Append an entry to the shared log buffer, trimming to the cap."""
+    _log_buffer.append(entry)
+    if len(_log_buffer) > _MAX_LOG_BUFFER:
+        # Keep the boundary consistent when we drop from the front.
+        global _play_boundary
+        _log_buffer.pop(0)
+        if _play_boundary > 0:
+            _play_boundary -= 1
+
+
+def mark_play_boundary() -> None:
+    """Record the buffer position at the current timeline Play."""
+    global _play_boundary
+    _play_boundary = len(_log_buffer)
+
+
+def _select_logs(buffer: list, boundary: int, since_last_play: bool, count: int) -> list:
+    """Pure selector: entries after the Play boundary (optional), capped to count."""
+    scoped = buffer[boundary:] if since_last_play else buffer
+    return scoped[-count:]
+
+
 def _ensure_log_listener():
-    """Register a carb log listener that captures errors and warnings."""
+    """Register a carb log listener that captures warnings and errors."""
     global _log_listener_active
     if _log_listener_active:
         return
@@ -187,23 +211,22 @@ def _ensure_log_listener():
     def _on_log(source, level, filename, function_name, module_name, line, message, pid, tid, timestamp):
         if level.value >= omni.log.Level.WARN.value:
             level_name = "WARN" if level == omni.log.Level.WARN else "ERROR"
-            entry = f"[{level_name}] [{source}] {message}"
-            _log_buffer.append(entry)
-            if len(_log_buffer) > _MAX_LOG_BUFFER:
-                _log_buffer.pop(0)
+            append_log(f"[{level_name}] [{source}] {message}")
 
     logger.set_channel_enabled("*", True, omni.log.SettingBehavior.OVERRIDE)
     logger.add_message_consumer(_on_log)
     _log_listener_active = True
 
 
-def get_logs(adapter: IsaacAdapterBase, clear: bool = True, count: int = 100) -> Dict[str, Any]:
-    """Return recent warning/error log messages from the Isaac Sim console."""
+def get_logs(adapter: IsaacAdapterBase, clear: bool = False, count: int = 100,
+             since_last_play: bool = True) -> Dict[str, Any]:
+    """Return recent WARN/ERROR + [PRINT] log messages, scoped to the current run."""
     try:
         _ensure_log_listener()
-        logs = _log_buffer[-count:]
+        logs = _select_logs(_log_buffer, _play_boundary, since_last_play, count)
         if clear:
             _log_buffer.clear()
+            mark_play_boundary()
         return {
             "status": "success",
             "log_count": len(logs),
