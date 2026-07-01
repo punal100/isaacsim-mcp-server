@@ -225,6 +225,13 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         USE this for: operations no named tool covers, such as creating Action Graphs,
         computing IK, setting up physics callbacks, or configuring advanced USD properties.
 
+        CAUTION: touching an articulation controlled by a running ScriptNode /
+        Action Graph can silently break its control path (no error is raised).
+        While a graph is running, read-only diagnostics (get_prim_info,
+        get_physics_state, get_joint_positions, get_isaac_logs) are safe, but
+        stop_simulation before using execute_script or named write tools on the
+        same articulation.
+
         For persistent controllers (>20 lines), write a .py file and load it with
         reload_script instead of pasting code here.
 

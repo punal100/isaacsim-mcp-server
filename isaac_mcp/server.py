@@ -99,6 +99,20 @@ See demo/franka_pick_place.py for a complete working example.
 ### Tool Priority
 Prefer named tools over execute_script: get_joint_positions, get_prim_info, get_physics_state,
 get_joint_config, get_isaac_logs, create_action_graph, edit_action_graph.
+
+### Contracts (silent-failure map)
+- step_simulation is authoritative and freezes the timeline; it errors if the
+  timeline is already playing. Never play during the debug loop (see Debug Loop).
+- stop_simulation resets the scene to spawn state (state at first Play).
+- get_isaac_logs shows carb.log_*/omni.log WARN+ERROR plus captured stdout
+  tagged [PRINT]; plain print() outside execute_script/reload_script may not
+  appear. Defaults are non-destructive and scoped to the current run.
+- execute_script can silently disturb a live Action Graph / ScriptNode that
+  controls the same articulation — stop the graph first.
+- ScriptNode physics contract: physics must be initialised before articulation
+  writes take effect; such write failures are SILENT (not raised). Follow the
+  WARMUP pattern (skip ~30 frames, then World.initialize_physics() +
+  robot.initialize()).
 """
 
 mcp = FastMCP(

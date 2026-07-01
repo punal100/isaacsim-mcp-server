@@ -103,3 +103,18 @@ def test_create_action_graph_has_inline_script_param():
             assert "script_file" in src and "recommended" in src.lower()
             return
     raise AssertionError("create_action_graph tool not found")
+
+
+def test_execute_script_warns_about_live_graph():
+    src = _read_tool_source("simulation.py")
+    assert "ScriptNode" in src
+    assert "silently" in src.lower()
+    assert "stop" in src.lower()
+
+
+def test_server_instructions_cover_contracts():
+    src = _read_server_source()
+    assert "resets to spawn" in src.lower() or "spawn state" in src.lower()   # stop (#8)
+    assert "[PRINT]" in src                                                    # log capture (#5)
+    assert "silently" in src.lower()                                           # execute_script (#6)
+    assert "silent" in src.lower()                                             # ScriptNode write failures
