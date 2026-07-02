@@ -43,6 +43,12 @@ _USD_DEFAULT_SIZE_M: Dict[str, float] = {
     "Plane": 1.0,  # UsdGeomPlane default width/length = 1
 }
 
+# Case-insensitive map from any casing to the canonical USD type name. USD type
+# names are case-sensitive, so passing "cube" to create_prim silently produces a
+# typeless prim with no geometry (no actual_size). Normalising here lets callers
+# (and agents) pass "cube"/"CUBE" and still get a real UsdGeom.Cube.
+_CANONICAL_PRIM_TYPES: Dict[str, str] = {name.lower(): name for name in _USD_DEFAULT_SIZE_M}
+
 
 def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["objects.create"] = lambda **p: create(adapter, **p)
@@ -63,6 +69,9 @@ def create(
     prim_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
+        # Normalise to the canonical USD type name so non-canonical casing
+        # ("cube") still creates real geometry instead of a typeless prim.
+        object_type = _CANONICAL_PRIM_TYPES.get(object_type.lower(), object_type)
         if not prim_path:
             stage = adapter.get_stage()
             count = len(list(stage.TraverseAll()))

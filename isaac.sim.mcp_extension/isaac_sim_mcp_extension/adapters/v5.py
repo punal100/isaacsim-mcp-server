@@ -1011,7 +1011,7 @@ class IsaacAdapterV5(IsaacAdapterBase):
         stage = self.get_stage()
         physics_dt = 1.0 / 60.0  # default
         for prim in stage.Traverse():
-            if prim.HasAPI(UsdPhysics.Scene):
+            if prim.IsA(UsdPhysics.Scene):
                 time_step_attr = prim.GetAttribute("physxScene:timeStepsPerSecond")
                 if time_step_attr and time_step_attr.Get():
                     steps_per_sec = time_step_attr.Get()

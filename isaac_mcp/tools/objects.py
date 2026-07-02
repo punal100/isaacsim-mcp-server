@@ -62,7 +62,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         other objects relative to this one.
 
         Args:
-            object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane.
+            object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane
+                (case-insensitive; "cube" is normalized to "Cube").
             position: [x, y, z] world position.
             rotation: [rx, ry, rz] rotation in degrees.
             scale: [sx, sy, sz] RAW multiplier of the native size (2 m for most
