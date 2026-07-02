@@ -356,3 +356,26 @@ def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
     assert "dest_path" not in captured["config"]
     assert captured["add_reference"] == ("/generated/robot.usd", "/World/robot")
     assert result == "/World/robot"
+
+
+def test_get_simulation_state_detects_physics_scene_with_isa():
+    """physics_dt detection must use IsA (typed schema), not HasAPI, on both adapters.
+
+    Verified live against Isaac Sim 6.0.1: HasAPI(UsdPhysics.Scene) returns False
+    on a PhysicsScene prim, so physics_dt stayed at 1/60 regardless of the scene's
+    timeStepsPerSecond; IsA(UsdPhysics.Scene) matches correctly.
+    """
+    import os
+
+    adapters_dir = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+    )
+    for fname in ("v5.py", "v6.py"):
+        with open(os.path.join(adapters_dir, fname)) as f:
+            src = f.read()
+        assert "IsA(UsdPhysics.Scene)" in src, f"{fname}: physics-scene check must use IsA"
+        assert "HasAPI(UsdPhysics.Scene)" not in src, f"{fname}: HasAPI never matches a typed schema"

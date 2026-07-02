@@ -21,28 +21,18 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Tests for fixes verified live against Isaac Sim (Copilot review findings)."""
+"""Behavioural tests for the objects command handler (mock adapter)."""
 
-import os
 from unittest.mock import MagicMock
 
-ADAPTERS = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension",
-    "adapters",
-)
+from isaac_sim_mcp_extension.handlers import objects
+
+# create_object must normalize non-canonical type casing before create_prim.
+# Verified live against Isaac Sim 6.0.1: object_type="cube" produced a typeless
+# prim (type "cube", no actual_size); "Cube" produced a real UsdGeom.Cube.
 
 
-# ── #1: create_object normalizes non-canonical type casing ────────────────────
-# Verified live: object_type="cube" produced a typeless prim (type "cube", no
-# actual_size); "Cube" produced a real UsdGeom.Cube. The handler must normalize.
-
-
-def test_create_object_normalizes_lowercase_type():
-    from isaac_sim_mcp_extension.handlers import objects
-
+def test_create_normalizes_lowercase_type_to_canonical():
     adapter = MagicMock()
     objects.create(adapter, object_type="cube", prim_path="/World/x")
 
@@ -52,24 +42,9 @@ def test_create_object_normalizes_lowercase_type():
     assert kwargs.get("prim_type") == "Cube"
 
 
-def test_create_object_leaves_canonical_and_unknown_types_untouched():
-    from isaac_sim_mcp_extension.handlers import objects
-
+def test_create_leaves_canonical_and_unknown_types_untouched():
     for given, expected in (("Cube", "Cube"), ("SPHERE", "Sphere"), ("Xform", "Xform")):
         adapter = MagicMock()
         objects.create(adapter, object_type=given, prim_path="/World/x")
         _args, kwargs = adapter.create_prim.call_args
         assert kwargs.get("prim_type") == expected
-
-
-# ── #2: get_simulation_state detects the PhysicsScene with IsA, not HasAPI ─────
-# Verified live: HasAPI(UsdPhysics.Scene) returned False on a PhysicsScene prim
-# (physics_dt stuck at 1/60); IsA(UsdPhysics.Scene) returned True (correct dt).
-
-
-def test_get_simulation_state_uses_isa_for_physics_scene():
-    for fname in ("v5.py", "v6.py"):
-        with open(os.path.join(ADAPTERS, fname)) as f:
-            src = f.read()
-        assert "IsA(UsdPhysics.Scene)" in src, f"{fname}: physics-scene check must use IsA"
-        assert "HasAPI(UsdPhysics.Scene)" not in src, f"{fname}: HasAPI never matches a typed schema"
