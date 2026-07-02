@@ -12,7 +12,11 @@ keywords = ["mcp", "server", "socket", "simulation", "robotics"]
 "isaacsim.core.experimental.utils" = {}
 "isaacsim.core.experimental.prims" = {}
 "isaacsim.core.experimental.objects" = {}
-"isaacsim.sensors.experimental.rtx" = {}
+# V6-only (6.0 PhysX + Newton) RTX sensor backend. Absent on Isaac Sim 5.1,
+# where a hard dependency makes Kit's solver exit before the extension can load.
+# Optional so 5.1 loads (V5 sensors use isaacsim.sensors.* loaded by the app);
+# on 6.0 PhysX/Newton it resolves and the V6 adapter imports it lazily.
+"isaacsim.sensors.experimental.rtx" = { optional = true }
 "isaacsim.asset.importer.urdf" = {}
 "omni.kit.uiapp" = {}
 "isaacsim.gui.components" = {}
