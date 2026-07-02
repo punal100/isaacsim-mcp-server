@@ -96,6 +96,7 @@ def main() -> int:
 
     # 1. Engine + version field exposed by V6
     resp = send(args.host, args.port, "simulation.get_state", {})
+
     def _check_state(r: Dict[str, Any]) -> tuple[bool, str]:
         if "engine" not in r:
             return False, "missing 'engine' field — V5 adapter is in use, not V6"
@@ -104,6 +105,7 @@ def main() -> int:
         if "isaacsim_version" not in r or not r["isaacsim_version"].startswith("6."):
             return False, f"unexpected isaacsim_version: {r.get('isaacsim_version')}"
         return True, ""
+
     results.append(check("simulation.get_state shows engine + isaacsim_version", resp, _check_state))
     engine = resp.get("result", {}).get("engine", "unknown")
     print(f"        engine={engine}, version={resp.get('result', {}).get('isaacsim_version')}")
@@ -114,19 +116,26 @@ def main() -> int:
 
     # 3. Create a cube and verify info
     send(args.host, args.port, "scene.clear", {})
-    resp = send(args.host, args.port, "objects.create", {
-        "object_type": "cube",
-        "prim_path": "/World/SmokeCube",
-        "size": 0.5,
-        "position": [0.0, 0.0, 1.0],
-    })
+    resp = send(
+        args.host,
+        args.port,
+        "objects.create",
+        {
+            "object_type": "cube",
+            "prim_path": "/World/SmokeCube",
+            "size": 0.5,
+            "position": [0.0, 0.0, 1.0],
+        },
+    )
     results.append(check("objects.create cube", resp))
 
     resp = send(args.host, args.port, "scene.get_prim_info", {"prim_path": "/World/SmokeCube"})
+
     def _is_cube(r: Dict[str, Any]) -> tuple[bool, str]:
         if r.get("type") != "Cube":
             return False, f"expected type=Cube, got {r.get('type')}"
         return True, ""
+
     results.append(check("scene.get_prim_info on cube", resp, _is_cube))
 
     # 4. Create a physics scene + ground plane, play, step a few frames
@@ -136,10 +145,16 @@ def main() -> int:
     resp = send(args.host, args.port, "simulation.play", {})
     results.append(check("simulation.play", resp))
 
-    resp = send(args.host, args.port, "simulation.step", {
-        "num_steps": 30,
-        "observe_prims": ["/World/SmokeCube"],
-    })
+    resp = send(
+        args.host,
+        args.port,
+        "simulation.step",
+        {
+            "num_steps": 30,
+            "observe_prims": ["/World/SmokeCube"],
+        },
+    )
+
     def _stepped(r: Dict[str, Any]) -> tuple[bool, str]:
         if "prim_states" not in r:
             return False, "no prim_states in step response"
@@ -147,6 +162,7 @@ def main() -> int:
         if not states or "position" not in states[0]:
             return False, "no position observed for cube"
         return True, ""
+
     results.append(check("simulation.step with observe_prims (physics view read)", resp, _stepped))
 
     resp = send(args.host, args.port, "simulation.stop", {})
@@ -160,21 +176,32 @@ def main() -> int:
     results.append(check("simulation.set_physics (reset test)", resp))
 
     spawn_z = 2.0
-    resp = send(args.host, args.port, "objects.create", {
-        "object_type": "cube",
-        "prim_path": "/World/ResetCube",
-        "size": 0.5,
-        "position": [0.0, 0.0, spawn_z],
-    })
+    resp = send(
+        args.host,
+        args.port,
+        "objects.create",
+        {
+            "object_type": "cube",
+            "prim_path": "/World/ResetCube",
+            "size": 0.5,
+            "position": [0.0, 0.0, spawn_z],
+        },
+    )
     results.append(check("objects.create cube above ground (reset test)", resp))
 
     resp = send(args.host, args.port, "simulation.play", {})
     results.append(check("simulation.play (reset test)", resp))
 
-    resp = send(args.host, args.port, "simulation.step", {
-        "num_steps": 60,
-        "observe_prims": ["/World/ResetCube"],
-    })
+    resp = send(
+        args.host,
+        args.port,
+        "simulation.step",
+        {
+            "num_steps": 60,
+            "observe_prims": ["/World/ResetCube"],
+        },
+    )
+
     def _fell(r: Dict[str, Any]) -> tuple[bool, str]:
         states = r.get("prim_states") or []
         if not states or "position" not in states[0]:
@@ -183,12 +210,14 @@ def main() -> int:
         if z >= spawn_z:
             return False, f"cube did not fall: z={z}"
         return True, ""
+
     results.append(check("simulation.step lets cube fall (reset test)", resp, _fell))
 
     resp = send(args.host, args.port, "simulation.stop", {})
     results.append(check("simulation.stop (reset test)", resp))
 
     resp = send(args.host, args.port, "scene.get_prim_info", {"prim_path": "/World/ResetCube"})
+
     def _back_at_spawn(r: Dict[str, Any]) -> tuple[bool, str]:
         position = r.get("position")
         if not position:
@@ -197,21 +226,30 @@ def main() -> int:
         if abs(z - spawn_z) > 1e-3:
             return False, f"expected z~={spawn_z} after stop, got z={z}"
         return True, ""
-    results.append(check(
-        "scene.get_prim_info shows cube back at spawn Z after stop_simulation",
-        resp, _back_at_spawn,
-    ))
+
+    results.append(
+        check(
+            "scene.get_prim_info shows cube back at spawn Z after stop_simulation",
+            resp,
+            _back_at_spawn,
+        )
+    )
 
     # 5. URDF import round-trip is skipped because it requires a local URDF
     #    file in a known location — verified separately in the demo.
 
     # 6. Sensor smoke (camera only; lidar configs vary by Isaac Sim build)
     if engine in ("physx", "newton"):
-        resp = send(args.host, args.port, "sensors.create_camera", {
-            "prim_path": "/World/SmokeCamera",
-            "position": [3.0, 0.0, 2.0],
-            "resolution": [320, 240],
-        })
+        resp = send(
+            args.host,
+            args.port,
+            "sensors.create_camera",
+            {
+                "prim_path": "/World/SmokeCamera",
+                "position": [3.0, 0.0, 2.0],
+                "resolution": [320, 240],
+            },
+        )
         results.append(check("sensors.create_camera (experimental.rtx.RtxCamera)", resp))
 
     # 7. reload_script recompiles a matching Action-Graph ScriptNode (manual,
@@ -222,17 +260,17 @@ def main() -> int:
     #    the file standalone.
     script_path = os.path.join(tempfile.gettempdir(), "smoke_test_scriptnode_controller.py")
     with open(script_path, "w") as f:
-        f.write(
-            "def setup(db):\n"
-            "    pass\n\n"
-            "def compute(db):\n"
-            "    return True\n"
-        )
+        f.write("def setup(db):\n    pass\n\ndef compute(db):\n    return True\n")
 
-    resp = send(args.host, args.port, "graphs.create_action_graph", {
-        "graph_path": "/World/SmokeActionGraph",
-        "script_file": script_path,
-    })
+    resp = send(
+        args.host,
+        args.port,
+        "graphs.create_action_graph",
+        {
+            "graph_path": "/World/SmokeActionGraph",
+            "script_file": script_path,
+        },
+    )
     results.append(check("graphs.create_action_graph (script_file ScriptNode)", resp))
 
     resp = send(args.host, args.port, "simulation.play", {})
@@ -249,16 +287,21 @@ def main() -> int:
         )
 
     resp = send(args.host, args.port, "simulation.reload_script", {"file_path": script_path})
+
     def _recompiled(r: Dict[str, Any]) -> tuple[bool, str]:
         if "recompiled_nodes" not in r:
             return False, "response missing 'recompiled_nodes' — fell back to standalone re-exec"
         if not r["recompiled_nodes"]:
             return False, "recompiled_nodes was empty — no ScriptNode matched"
         return True, ""
-    results.append(check(
-        "simulation.reload_script recompiles the ScriptNode (not standalone re-exec)",
-        resp, _recompiled,
-    ))
+
+    results.append(
+        check(
+            "simulation.reload_script recompiles the ScriptNode (not standalone re-exec)",
+            resp,
+            _recompiled,
+        )
+    )
 
     resp = send(args.host, args.port, "simulation.stop", {})
     results.append(check("simulation.stop (scriptnode reload test)", resp))

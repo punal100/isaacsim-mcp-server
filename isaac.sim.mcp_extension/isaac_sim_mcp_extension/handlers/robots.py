@@ -28,8 +28,6 @@ from __future__ import annotations
 import traceback
 from typing import Any, Dict, List, Optional, Sequence
 
-import numpy as np
-
 from ..adapters.base import IsaacAdapterBase
 
 # Hardcoded fallback — used only if live discovery fails.

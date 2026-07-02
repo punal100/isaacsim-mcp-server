@@ -35,12 +35,12 @@ from ..adapters.base import IsaacAdapterBase
 # defaults — a 2m³ Cube, a 2m-diameter Sphere — which are surprising next
 # to a typical 1.2m-tall robot.
 _USD_DEFAULT_SIZE_M: Dict[str, float] = {
-    "Cube": 2.0,      # UsdGeom.Cube default size = 2
-    "Sphere": 2.0,    # UsdGeom.Sphere default radius = 1 → diameter 2
+    "Cube": 2.0,  # UsdGeom.Cube default size = 2
+    "Sphere": 2.0,  # UsdGeom.Sphere default radius = 1 → diameter 2
     "Cylinder": 2.0,  # UsdGeom.Cylinder default height = 2
-    "Cone": 2.0,      # UsdGeom.Cone default height = 2
-    "Capsule": 2.0,   # UsdGeom.Capsule height=1 + 2*radius(0.5) = 2 end-to-end
-    "Plane": 1.0,     # UsdGeomPlane default width/length = 1
+    "Cone": 2.0,  # UsdGeom.Cone default height = 2
+    "Capsule": 2.0,  # UsdGeom.Capsule height=1 + 2*radius(0.5) = 2 end-to-end
+    "Plane": 1.0,  # UsdGeomPlane default width/length = 1
 }
 
 

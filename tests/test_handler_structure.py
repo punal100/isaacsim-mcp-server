@@ -150,9 +150,7 @@ def test_v6_implements_all_abstract_methods():
                     abstract_methods.add(node.name)
 
     v6_tree = _parse_file(os.path.join(EXTENSION_ROOT, "adapters", "v6.py"))
-    v6_methods = {
-        node.name for node in ast.walk(v6_tree) if isinstance(node, ast.FunctionDef)
-    }
+    v6_methods = {node.name for node in ast.walk(v6_tree) if isinstance(node, ast.FunctionDef)}
 
     missing = abstract_methods - v6_methods
     assert not missing, f"IsaacAdapterV6 is missing abstract methods: {sorted(missing)}"

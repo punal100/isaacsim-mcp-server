@@ -27,8 +27,11 @@ import ast
 import os
 
 ADAPTERS = os.path.join(
-    os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension", "adapters",
+    os.path.dirname(__file__),
+    "..",
+    "isaac.sim.mcp_extension",
+    "isaac_sim_mcp_extension",
+    "adapters",
 )
 
 

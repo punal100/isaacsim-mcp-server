@@ -111,12 +111,10 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 self._camera_sensors.clear()
                 self._lidar_sensors.clear()
 
-            self._timeline_stop_subscription = (
-                carb.eventdispatcher.get_eventdispatcher().observe_event(
-                    event_name=omni.timeline.GLOBAL_EVENT_STOP,
-                    on_event=_on_timeline_stop,
-                    observer_name="isaac_sim_mcp.v6.cache_reset_on_stop",
-                )
+            self._timeline_stop_subscription = carb.eventdispatcher.get_eventdispatcher().observe_event(
+                event_name=omni.timeline.GLOBAL_EVENT_STOP,
+                on_event=_on_timeline_stop,
+                observer_name="isaac_sim_mcp.v6.cache_reset_on_stop",
             )
         except Exception:
             pass
@@ -231,9 +229,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
             )
             op.Set(Gf.Vec3d(*rotation))
         if scale is not None:
-            op = existing.get("xformOp:scale") or xformable.AddScaleOp(
-                precision=UsdGeom.XformOp.PrecisionDouble
-            )
+            op = existing.get("xformOp:scale") or xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble)
             op.Set(Gf.Vec3d(*scale))
 
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
@@ -755,9 +751,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # CameraSensor expects (height, width). Adapter callers historically
         # pass (width, height) — translate so the cached resolution is sane.
         h, w = (resolution[1], resolution[0]) if len(resolution) == 2 else (720, 1280)
-        self._camera_sensors[prim_path] = CameraSensor(
-            path=prim_path, resolution=(h, w), annotators=["rgb"]
-        )
+        self._camera_sensors[prim_path] = CameraSensor(path=prim_path, resolution=(h, w), annotators=["rgb"])
         return camera
 
     def capture_camera_image(self, prim_path: str) -> np.ndarray:
@@ -788,9 +782,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
         from isaacsim.sensors.experimental.rtx import Lidar, LidarSensor
 
         lidar = Lidar(path=prim_path)
-        self._lidar_sensors[prim_path] = LidarSensor(
-            path=prim_path, annotators=["generic-model-output"]
-        )
+        self._lidar_sensors[prim_path] = LidarSensor(path=prim_path, annotators=["generic-model-output"])
         return lidar
 
     def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:

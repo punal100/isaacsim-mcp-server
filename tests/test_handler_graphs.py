@@ -27,8 +27,11 @@ import ast
 import os
 
 HANDLERS = os.path.join(
-    os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension", "handlers",
+    os.path.dirname(__file__),
+    "..",
+    "isaac.sim.mcp_extension",
+    "isaac_sim_mcp_extension",
+    "handlers",
 )
 
 
@@ -66,10 +69,14 @@ def test_force_recompile_helper_exists_and_is_reused():
 def test_reload_script_scans_scriptnodes_by_scriptpath():
     for fname in ("v6.py", "v5.py"):
         path = os.path.join(
-            os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-            "isaac_sim_mcp_extension", "adapters", fname,
+            os.path.dirname(__file__),
+            "..",
+            "isaac.sim.mcp_extension",
+            "isaac_sim_mcp_extension",
+            "adapters",
+            fname,
         )
         with open(path) as f:
             src = f.read()
-        assert "inputs:scriptPath" in src            # reload matches nodes by their file
-        assert "force_recompile_scriptnode" in src   # and recompiles them
+        assert "inputs:scriptPath" in src  # reload matches nodes by their file
+        assert "force_recompile_scriptnode" in src  # and recompiles them

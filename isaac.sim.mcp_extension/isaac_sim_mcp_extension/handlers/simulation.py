@@ -218,8 +218,9 @@ def _ensure_log_listener():
     _log_listener_active = True
 
 
-def get_logs(adapter: IsaacAdapterBase, clear: bool = False, count: int = 100,
-             since_last_play: bool = True) -> Dict[str, Any]:
+def get_logs(
+    adapter: IsaacAdapterBase, clear: bool = False, count: int = 100, since_last_play: bool = True
+) -> Dict[str, Any]:
     """Return recent WARN/ERROR + [PRINT] log messages, scoped to the current run."""
     try:
         _ensure_log_listener()

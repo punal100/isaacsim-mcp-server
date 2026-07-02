@@ -43,9 +43,9 @@ def test_create_object_documents_scale_multiplier():
     src = _read_tool_source("objects.py")
     # scale= is a raw multiplier of the primitive's native size
     assert "native size" in src
-    assert "2 m" in src or "2m" in src           # native size of Cube/Sphere/etc
-    assert "scale=0.5" in src                     # worked example -> 1 m
-    assert "size=" in src                         # steer to size= for absolute meters
+    assert "2 m" in src or "2m" in src  # native size of Cube/Sphere/etc
+    assert "scale=0.5" in src  # worked example -> 1 m
+    assert "size=" in src  # steer to size= for absolute meters
 
 
 def test_step_simulation_docstring_forbids_play_first():
@@ -79,11 +79,12 @@ def test_reload_script_documents_scriptnode_mode():
 
 def test_get_isaac_logs_has_since_last_play_and_nondestructive_default():
     import ast
+
     src = _read_tool_source("simulation.py")
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "get_isaac_logs":
-            defaults = {a.arg: d for a, d in zip(node.args.args[-len(node.args.defaults):], node.args.defaults)}
+            defaults = {a.arg: d for a, d in zip(node.args.args[-len(node.args.defaults) :], node.args.defaults)}
             assert "since_last_play" in {a.arg for a in node.args.args}
             # clear defaults to False (non-destructive)
             clear_default = defaults.get("clear")
@@ -94,6 +95,7 @@ def test_get_isaac_logs_has_since_last_play_and_nondestructive_default():
 
 def test_create_action_graph_has_inline_script_param():
     import ast
+
     src = _read_tool_source("graphs.py")
     tree = ast.parse(src)
     for node in ast.walk(tree):
@@ -114,7 +116,7 @@ def test_execute_script_warns_about_live_graph():
 
 def test_server_instructions_cover_contracts():
     src = _read_server_source()
-    assert "resets to spawn" in src.lower() or "spawn state" in src.lower()   # stop (#8)
-    assert "[PRINT]" in src                                                    # log capture (#5)
-    assert "silently" in src.lower()                                           # execute_script (#6)
-    assert "silent" in src.lower()                                             # ScriptNode write failures
+    assert "resets to spawn" in src.lower() or "spawn state" in src.lower()  # stop (#8)
+    assert "[PRINT]" in src  # log capture (#5)
+    assert "silently" in src.lower()  # execute_script (#6)
+    assert "silent" in src.lower()  # ScriptNode write failures

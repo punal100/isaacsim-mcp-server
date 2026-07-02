@@ -186,9 +186,7 @@ class IsaacAdapterV5(IsaacAdapterBase):
             )
             op.Set(Gf.Vec3d(*rotation))
         if scale is not None:
-            op = existing.get("xformOp:scale") or xformable.AddScaleOp(
-                precision=UsdGeom.XformOp.PrecisionDouble
-            )
+            op = existing.get("xformOp:scale") or xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble)
             op.Set(Gf.Vec3d(*scale))
 
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:

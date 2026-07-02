@@ -66,6 +66,7 @@ def _install_isaac_stubs() -> None:
         omni_mod = sys.modules["omni"]
 
     if "omni.ext" not in sys.modules:
+
         class _IExt:
             def __init__(self):
                 pass

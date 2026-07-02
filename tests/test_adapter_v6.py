@@ -35,8 +35,10 @@ import pytest
 @pytest.fixture
 def fake_v5(monkeypatch):
     mod = types.ModuleType("isaac_sim_mcp_extension.adapters.v5")
+
     class _V5:
         pass
+
     mod.IsaacAdapterV5 = _V5
     monkeypatch.setitem(sys.modules, "isaac_sim_mcp_extension.adapters.v5", mod)
     return _V5
@@ -45,8 +47,10 @@ def fake_v5(monkeypatch):
 @pytest.fixture
 def fake_v6(monkeypatch):
     mod = types.ModuleType("isaac_sim_mcp_extension.adapters.v6")
+
     class _V6:
         pass
+
     mod.IsaacAdapterV6 = _V6
     monkeypatch.setitem(sys.modules, "isaac_sim_mcp_extension.adapters.v6", mod)
     return _V6
@@ -54,6 +58,7 @@ def fake_v6(monkeypatch):
 
 def test_get_adapter_returns_v5_when_version_5(fake_v5, fake_v6):
     from isaac_sim_mcp_extension.adapters import get_adapter
+
     with patch("isaac_sim_mcp_extension.adapters._detect_isaacsim_major_version", return_value=5):
         adapter = get_adapter()
     assert isinstance(adapter, fake_v5)
@@ -61,6 +66,7 @@ def test_get_adapter_returns_v5_when_version_5(fake_v5, fake_v6):
 
 def test_get_adapter_returns_v6_when_version_6(fake_v5, fake_v6):
     from isaac_sim_mcp_extension.adapters import get_adapter
+
     with patch("isaac_sim_mcp_extension.adapters._detect_isaacsim_major_version", return_value=6):
         adapter = get_adapter()
     assert isinstance(adapter, fake_v6)
@@ -68,6 +74,7 @@ def test_get_adapter_returns_v6_when_version_6(fake_v5, fake_v6):
 
 def test_get_adapter_falls_back_to_v5_when_detection_fails(fake_v5, fake_v6):
     from isaac_sim_mcp_extension.adapters import get_adapter
+
     with patch("isaac_sim_mcp_extension.adapters._detect_isaacsim_major_version", return_value=0):
         adapter = get_adapter()
     assert isinstance(adapter, fake_v5)
@@ -83,9 +90,11 @@ def test_detect_version_reads_isaacsim_core_version(monkeypatch):
     monkeypatch.setitem(sys.modules, "isaacsim.core", fake_core_mod)
     monkeypatch.setitem(sys.modules, "isaacsim.core.version", fake_version_mod)
 
-    from isaac_sim_mcp_extension.adapters import _detect_isaacsim_major_version
     # Module already loaded in earlier tests; force a fresh import path
-    import importlib, isaac_sim_mcp_extension.adapters as adapters_mod
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters as adapters_mod
+
     importlib.reload(adapters_mod)
     assert adapters_mod._detect_isaacsim_major_version() == 6
 
@@ -96,7 +105,10 @@ def test_detect_version_returns_zero_on_failure(monkeypatch):
         if name.startswith("isaacsim"):
             monkeypatch.delitem(sys.modules, name, raising=False)
 
-    import importlib, isaac_sim_mcp_extension.adapters as adapters_mod
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters as adapters_mod
+
     importlib.reload(adapters_mod)
     assert adapters_mod._detect_isaacsim_major_version() == 0
 
@@ -114,10 +126,12 @@ def test_v6_create_prim_calls_experimental_define_prim(monkeypatch):
 
     # SimulationManager mock for __init__
     fake_sm_mod = types.ModuleType("isaacsim.core.simulation_manager")
+
     class _SM:
         @classmethod
         def get_active_physics_engine(cls):
             return "physx"
+
     fake_sm_mod.SimulationManager = _SM
     monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", fake_sm_mod)
 
@@ -126,7 +140,9 @@ def test_v6_create_prim_calls_experimental_define_prim(monkeypatch):
     monkeypatch.setitem(sys.modules, "isaacsim.core.version", fake_version_mod)
 
     import importlib
+
     import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     result = adapter.create_prim("/World/Foo", "Xform")
@@ -154,11 +170,12 @@ def test_v6_ensure_physics_world_calls_simulation_manager(monkeypatch):
     fake_sm_mod = types.ModuleType("isaacsim.core.simulation_manager")
     fake_sm_mod.SimulationManager = _SM
     monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", fake_sm_mod)
-    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
-                        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.0"))
 
     import importlib
+
     import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     adapter._ensure_physics_world()
@@ -196,17 +213,27 @@ def test_v6_set_joint_positions_calls_set_dof_position_targets(monkeypatch):
     monkeypatch.setitem(sys.modules, "warp", fake_warp_mod)
     monkeypatch.setitem(sys.modules, "isaacsim.core.experimental", types.ModuleType("isaacsim.core.experimental"))
     monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.prims", fake_prims_mod)
-    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
-                        types.SimpleNamespace(SimulationManager=type("SM", (), {
-                            "get_active_physics_engine": classmethod(lambda cls: "physx"),
-                            "setup_simulation": classmethod(lambda cls, dt=None, device=None: None),
-                            "initialize_physics": classmethod(lambda cls: None),
-                        })))
-    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
-                        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {
+                    "get_active_physics_engine": classmethod(lambda cls: "physx"),
+                    "setup_simulation": classmethod(lambda cls, dt=None, device=None: None),
+                    "initialize_physics": classmethod(lambda cls: None),
+                },
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.0"))
 
     import importlib
+
     import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     adapter.set_joint_positions("/World/Franka", [0.1, 0.2, 0.3])
@@ -229,20 +256,31 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     class _Stage:
         def Traverse(self):
             return []
+
     fake_usd_mod = types.ModuleType("omni.usd")
     fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
     monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
     fake_omni_mod.usd = fake_usd_mod
 
-    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
-        types.SimpleNamespace(SimulationManager=type("SM", (), {
-            "get_active_physics_engine": classmethod(lambda cls: "newton"),
-        })))
-    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
-        types.SimpleNamespace(get_version=lambda: "6.0.0-rc.59"))
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {
+                    "get_active_physics_engine": classmethod(lambda cls: "newton"),
+                },
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.0-rc.59"))
 
     import importlib
+
     import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     state = adapter.get_simulation_state()
@@ -285,18 +323,29 @@ def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "isaacsim.asset.importer.urdf", fake_urdf_mod)
     monkeypatch.setitem(sys.modules, "isaacsim.core", types.ModuleType("isaacsim.core"))
     monkeypatch.setitem(sys.modules, "isaacsim.core.experimental", types.ModuleType("isaacsim.core.experimental"))
-    monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.utils",
-        types.ModuleType("isaacsim.core.experimental.utils"))
+    monkeypatch.setitem(
+        sys.modules, "isaacsim.core.experimental.utils", types.ModuleType("isaacsim.core.experimental.utils")
+    )
     monkeypatch.setitem(sys.modules, "isaacsim.core.experimental.utils.stage", fake_stage_mod)
-    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager",
-        types.SimpleNamespace(SimulationManager=type("SM", (), {
-            "get_active_physics_engine": classmethod(lambda cls: "physx"),
-        })))
-    monkeypatch.setitem(sys.modules, "isaacsim.core.version",
-        types.SimpleNamespace(get_version=lambda: "6.0.0"))
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {
+                    "get_active_physics_engine": classmethod(lambda cls: "physx"),
+                },
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.0"))
 
     import importlib
+
     import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
     result = adapter.import_urdf(str(urdf_file), prim_path="/World/robot")

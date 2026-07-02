@@ -46,9 +46,9 @@ def test_get_logs_default_is_non_destructive(monkeypatch):
     monkeypatch.setattr(sim, "_log_buffer", ["x", "y"], raising=False)
     monkeypatch.setattr(sim, "_play_boundary", 0, raising=False)
     monkeypatch.setattr(sim, "_ensure_log_listener", lambda: None)
-    result = sim.get_logs(adapter=None)          # defaults: clear=False
+    result = sim.get_logs(adapter=None)  # defaults: clear=False
     assert result["logs"] == ["x", "y"]
-    assert sim._log_buffer == ["x", "y"]          # buffer intact
+    assert sim._log_buffer == ["x", "y"]  # buffer intact
 
 
 def test_append_and_mark_boundary_scopes_new_run(monkeypatch):
