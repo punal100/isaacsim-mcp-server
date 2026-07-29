@@ -25,7 +25,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+import glob
+import os
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from ..adapters.base import IsaacAdapterBase
 
@@ -169,10 +171,17 @@ def reload_script_handler(
 
 # ── Log buffer for get_logs ───────────────────────────────────────────────────
 
+# _log_buffer holds only [PRINT] output captured from execute_script /
+# reload_script. WARN/ERROR come from Kit's own log file (see get_kit_log_path)
+# — never from a Python log consumer, which deadlocks physics loads.
 _log_buffer: list = []
 _log_listener_active: bool = False
 _play_boundary: int = 0
 _MAX_LOG_BUFFER = 500
+# Path of Kit's session log file: None = not resolved yet, "" = unavailable.
+_kit_log_path: Optional[str] = None
+# Byte offset into that file at the last timeline Play.
+_kit_log_play_offset: int = 0
 
 
 def append_log(entry: str) -> None:
@@ -187,9 +196,19 @@ def append_log(entry: str) -> None:
 
 
 def mark_play_boundary() -> None:
-    """Record the buffer position at the current timeline Play."""
-    global _play_boundary
+    """Record the run boundary at the current timeline Play.
+
+    Two positions: the [PRINT] buffer index, and the byte offset into Kit's log
+    file, so `since_last_play` scopes both sources to the current run.
+    """
+    global _play_boundary, _kit_log_play_offset
     _play_boundary = len(_log_buffer)
+    path = get_kit_log_path()
+    if path:
+        try:
+            _kit_log_play_offset = os.path.getsize(path)
+        except Exception:
+            pass
 
 
 def _select_logs(buffer: list, boundary: int, since_last_play: bool, count: int) -> list:
@@ -198,33 +217,91 @@ def _select_logs(buffer: list, boundary: int, since_last_play: bool, count: int)
     return scoped[-count:]
 
 
+def get_kit_log_path() -> Optional[str]:
+    """Absolute path of the log file Kit is writing this session, or None.
+
+    Kit publishes it in the `/log/file` setting; fall back to the newest
+    kit_*.log under the Omniverse logs tree.
+    """
+    global _kit_log_path
+    if _kit_log_path is not None:
+        return _kit_log_path or None
+    path = None
+    try:
+        import carb
+
+        value = carb.settings.get_settings().get("/log/file")
+        if value and os.path.isfile(value):
+            path = value
+    except Exception:
+        pass
+    if path is None:
+        try:
+            candidates = glob.glob(os.path.expanduser("~/.nvidia-omniverse/logs/Kit/*/*/kit_*.log"))
+            if candidates:
+                path = max(candidates, key=os.path.getmtime)
+        except Exception:
+            path = None
+    _kit_log_path = path or ""
+    return path
+
+
 def _ensure_log_listener():
-    """Register a carb log listener that captures warnings and errors."""
+    """Prepare log capture. Deliberately does NOT install a Python log consumer.
+
+    A `carb`/`omni.log` message consumer is a Python callback that Kit invokes
+    on whatever thread emitted the message. During a physics load
+    (SingleArticulation.initialize() / World.initialize_physics()) omni.physx
+    emits warnings from native TBB worker threads while the calling thread holds
+    the GIL inside the native call — the worker blocks acquiring the GIL, the
+    load never completes, and kit deadlocks permanently (reproduced on Isaac Sim
+    5.1: spawning a Franka FR3, which emits invalid-inertia warnings, wedges kit
+    forever with a Python consumer installed).
+
+    Kit already writes every WARN/ERROR to its own log file starting at [0ms] —
+    earlier than this extension can load, and it survives a crash or freeze — so
+    get_logs reads that file instead. Startup-crash diagnostics are strictly
+    better this way; nothing is captured on a live callback.
+    """
     global _log_listener_active
     if _log_listener_active:
         return
-
-    import omni.log
-
-    logger = omni.log.get_log()
-
-    def _on_log(source, level, filename, function_name, module_name, line, message, pid, tid, timestamp):
-        if level.value >= omni.log.Level.WARN.value:
-            level_name = "WARN" if level == omni.log.Level.WARN else "ERROR"
-            append_log(f"[{level_name}] [{source}] {message}")
-
-    logger.set_channel_enabled("*", True, omni.log.SettingBehavior.OVERRIDE)
-    logger.add_message_consumer(_on_log)
+    get_kit_log_path()
     _log_listener_active = True
+
+
+def _read_kit_log_warnings(since_offset: int, count: int) -> Tuple[list, int]:
+    """Return (WARN/ERROR lines from the kit log after `since_offset`, new offset)."""
+    path = get_kit_log_path()
+    if not path:
+        return [], since_offset
+    try:
+        size = os.path.getsize(path)
+        start = since_offset if 0 <= since_offset <= size else 0
+        with open(path, "r", errors="replace") as f:
+            f.seek(start)
+            chunk = f.read()
+            new_offset = f.tell()
+    except Exception:
+        return [], since_offset
+    entries = [ln.rstrip("\n") for ln in chunk.splitlines() if ("[Warning]" in ln or "[Error]" in ln)]
+    return entries[-count:], new_offset
 
 
 def get_logs(
     adapter: IsaacAdapterBase, clear: bool = False, count: int = 100, since_last_play: bool = True
 ) -> Dict[str, Any]:
-    """Return recent WARN/ERROR + [PRINT] log messages, scoped to the current run."""
+    """Return recent WARN/ERROR + [PRINT] log messages, scoped to the current run.
+
+    WARN/ERROR are read from Kit's own session log file (covers everything from
+    [0ms], survives a crash); [PRINT] comes from the captured stdout buffer.
+    """
     try:
+        global _kit_log_play_offset
         _ensure_log_listener()
-        logs = _select_logs(_log_buffer, _play_boundary, since_last_play, count)
+        prints = _select_logs(_log_buffer, _play_boundary, since_last_play, count)
+        warnings, _ = _read_kit_log_warnings(_kit_log_play_offset if since_last_play else 0, count)
+        logs = (warnings + prints)[-count:]
         if clear:
             _log_buffer.clear()
             mark_play_boundary()
@@ -232,6 +309,7 @@ def get_logs(
             "status": "success",
             "log_count": len(logs),
             "logs": logs,
+            "kit_log_file": get_kit_log_path(),
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
