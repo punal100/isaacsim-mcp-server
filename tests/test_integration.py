@@ -313,7 +313,11 @@ class TestRobotTools:
         assert resp["status"] == "success", f"Failed: {resp}"
         result = resp["result"]
         robots = result["robots"]
-        assert "franka" in robots
+        # Keys come from the asset directory names, which differ per Isaac Sim
+        # version: 5.1 ships the Franka arms under FrankaRobotics/ as
+        # frankapanda, frankafr3, frankaemika and factoryfranka, with no bare
+        # "franka" entry. create_robot("franka") still resolves by fuzzy match.
+        assert any(key.startswith("franka") for key in robots), f"no franka* robot in {sorted(robots)[:20]}"
         assert "g1" in robots
         assert "go1" in robots
         assert "jetbot" in robots
@@ -521,6 +525,11 @@ class TestSimulationTools:
         assert resp["status"] == "success", f"Failed: {resp}"
 
     def test_step(self, conn: IsaacConnection) -> None:
+        # Stepping is only valid on a frozen timeline and is refused by design
+        # while one is free-running. test_play leaves the timeline playing, so
+        # freeze it here rather than inheriting whatever the previous test left
+        # behind — this test passed alone and failed in suite order otherwise.
+        send(conn, "simulation.stop")
         resp = send(conn, "simulation.step", {"num_steps": 10})
         assert resp["status"] == "success", f"Failed: {resp}"
 
