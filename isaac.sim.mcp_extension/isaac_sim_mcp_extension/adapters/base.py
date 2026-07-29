@@ -268,6 +268,38 @@ class IsaacAdapterBase(ABC):
 
     # ── Simulation ─────────────────────────────────────────
 
+    def _resync_physics_scene_cache(self) -> None:
+        """Rebuild SimulationManager's PhysxSceneAPI cache from the live stage.
+
+        SimulationManager keys cached PhysxSceneAPI handles by prim path and
+        maintains them with add/delete callbacks. Deleting a PhysicsScene does
+        not reliably evict its entry (see the "TODO: match physics scene prim
+        path" in isaacsim.core.simulation_manager), so after clear_scene the
+        cache can map a path whose prim is valid again — because the scene was
+        re-created — onto an API bound to the deleted prim. Reading through it
+        then raises "Accessed schema on invalid prim", which breaks
+        initialize_physics() and everything that depends on it.
+
+        Re-applying the schema to the prims currently on the stage restores the
+        cache. Best effort: the cache is private, so guard every access.
+        """
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+            from pxr import PhysxSchema
+        except Exception:
+            return
+        apis = getattr(SimulationManager, "_physics_scene_apis", None)
+        if apis is None:
+            return
+        try:
+            stage = self.get_stage()
+            apis.clear()
+            for prim in stage.Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    apis[str(prim.GetPath())] = PhysxSchema.PhysxSceneAPI.Apply(prim)
+        except Exception:
+            pass
+
     def _ensure_physics_world(self) -> None:
         """Ensure a World with initialised physics exists.
 
@@ -279,8 +311,11 @@ class IsaacAdapterBase(ABC):
         """
         try:
             from isaacsim.core.api import World
+        except ImportError:
+            return  # Non-v5 runtimes may not have isaacsim.core.api
 
-            world = World.instance()
+        def _prepare(world):
+            """Build the World if absent and make sure physics is initialised."""
             if world is None:
                 world = World(
                     physics_dt=1.0 / 60.0,
@@ -289,8 +324,35 @@ class IsaacAdapterBase(ABC):
                 )
             if world.physics_sim_view is None:
                 world.initialize_physics()
-        except ImportError:
-            pass  # Non-v5 runtimes may not have isaacsim.core.api
+            return world
+
+        try:
+            _prepare(World.instance())
+        except Exception:
+            # The cached World outlives the prims it was built against, so after
+            # clear_scene (or any prim deletion) it dereferences dead handles and
+            # raises "Accessed schema on invalid prim". Note the raise can come
+            # from merely reading physics_sim_view, not just from
+            # initialize_physics(), so the whole preparation is guarded.
+            #
+            # Untreated this wedges every tool routed through here — play, step,
+            # execute_script, reload_script, get_joint_config,
+            # create_action_graph — until Kit is restarted. Drop the stale
+            # singleton and rebuild against the live stage.
+            self._resync_physics_scene_cache()
+            try:
+                World.clear_instance()
+            except Exception:
+                pass
+            try:
+                _prepare(None)
+            except Exception as exc:
+                # Still best effort: this helper only pre-warms physics. Raising
+                # here would take down every tool that calls it, so report and
+                # continue — whatever actually needs physics will fail with its
+                # own specific error instead of a blanket wedge. The message
+                # reaches kit's log, which get_isaac_logs surfaces.
+                print(f"_ensure_physics_world: could not initialise physics ({exc}); continuing without it")
 
     @abstractmethod
     def play(self) -> None:

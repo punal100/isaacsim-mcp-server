@@ -99,6 +99,18 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, An
             if keep_physics and "Physics" in path:
                 continue
             adapter.delete_prim(path)
+        # The cached World still points at the prims just deleted. Left in place
+        # it survives until something calls initialize_physics() on it, which
+        # then raises "Accessed schema on invalid prim" and wedges every tool
+        # that ensures a physics world. Drop it so the next call rebuilds
+        # against the live stage.
+        try:
+            from isaacsim.core.api import World
+
+            if World.instance() is not None:
+                World.clear_instance()
+        except Exception:
+            pass  # Non-v5 runtimes / no World in play — nothing to invalidate.
         return {"status": "success", "message": "Scene cleared"}
     except Exception as e:
         return {"status": "error", "message": str(e)}

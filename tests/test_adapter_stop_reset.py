@@ -65,3 +65,87 @@ def test_v5_stop_stops_the_timeline_and_does_not_call_world_reset():
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     assert "stop()" in code
     assert "world.reset()" not in code, "World.reset() re-starts the timeline; stop must leave the sim stopped"
+
+
+def test_ensure_physics_world_recovers_from_stale_world():
+    """A World cached across prim deletion must not wedge every physics tool.
+
+    clear_scene deletes the prims the cached World was built against. The next
+    initialize_physics() then dereferences dead handles and raises "Accessed
+    schema on invalid prim", which used to break play, step, execute_script,
+    reload_script, get_joint_config and create_action_graph until Kit restarted.
+    """
+    import ast
+    import os
+
+    base = os.path.join(ADAPTERS, "base.py")
+    with open(base) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
+            src = ast.get_source_segment(text, node)
+    assert src, "_ensure_physics_world not found"
+    assert "clear_instance" in src, "must drop the stale World and rebuild instead of propagating the error"
+
+
+def test_clear_scene_invalidates_cached_world():
+    import os
+
+    scene = os.path.join(
+        os.path.dirname(__file__), "..", "isaac.sim.mcp_extension", "isaac_sim_mcp_extension", "handlers", "scene.py"
+    )
+    with open(scene) as f:
+        text = f.read()
+    assert "clear_instance" in text, "clear_scene must invalidate the World it just orphaned"
+
+
+def test_ensure_physics_world_never_wedges_the_tool_surface():
+    """A best-effort pre-warm must not raise: it is called by nearly every tool.
+
+    If it propagates, play, step, execute_script, reload_script, get_joint_config
+    and create_action_graph all fail at once and the session is unusable until
+    Kit restarts. Report and continue instead, so callers that genuinely need
+    physics fail with their own specific error.
+    """
+    import ast
+    import os
+
+    base = os.path.join(ADAPTERS, "base.py")
+    with open(base) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
+            src = ast.get_source_segment(text, node)
+    assert src
+    # The recovery path must end in a report, not a bare re-raise.
+    assert "continuing without it" in src, "recovery must degrade gracefully rather than wedge every tool"
+
+
+def test_recovery_resyncs_simulation_manager_scene_cache():
+    """The stale handle lives in SimulationManager, not World.
+
+    SimulationManager caches PhysxSceneAPI per prim path. Deleting a
+    PhysicsScene does not reliably evict the entry, so after clear_scene the
+    path can be valid again (the scene was re-created) while the cached API
+    still points at the deleted prim. Reading it raises "Accessed schema on
+    invalid prim". Verified live: get_physics_dt() raised before re-applying the
+    schema from the live stage and returned 1/60 afterwards.
+    """
+    import ast
+    import os
+
+    base = os.path.join(ADAPTERS, "base.py")
+    with open(base) as f:
+        text = f.read()
+    assert "_resync_physics_scene_cache" in text, "recovery must rebuild SimulationManager's scene cache"
+
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
+            src = ast.get_source_segment(text, node)
+    assert "_resync_physics_scene_cache" in src, "resync must run on the recovery path"
