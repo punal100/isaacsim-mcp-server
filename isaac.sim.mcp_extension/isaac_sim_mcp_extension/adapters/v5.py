@@ -924,10 +924,32 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def step(
         self, num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
     ) -> Dict[str, Any]:
+        # Advance physics by exactly num_steps frames on a frozen timeline, then
+        # freeze again, so the caller can inspect the result — the V6 contract,
+        # where SimulationManager.step(steps=N) does this natively.
+        #
+        # Pumping omni.kit.app.update() alone (the old behaviour) does NOT
+        # advance physics while the timeline is stopped: a cube left at z=2 was
+        # still at z=2 with zero velocity after 70 "steps", so every observation
+        # came back identical and the step-only debug loop could never simulate
+        # anything. Physics only ticks while the timeline runs, so run it for the
+        # requested frames and pause immediately afterwards.
         import omni.kit.app
+        import omni.timeline
 
-        for _ in range(num_steps):
-            omni.kit.app.get_app().update()
+        self._ensure_physics_world()
+        timeline = omni.timeline.get_timeline_interface()
+        resume_paused = not timeline.is_playing()
+        if resume_paused:
+            timeline.play()
+        try:
+            for _ in range(num_steps):
+                omni.kit.app.get_app().update()
+        finally:
+            if resume_paused:
+                # Pause (not stop): stop would reset everything to the spawn
+                # pose and discard exactly the physics result being measured.
+                timeline.pause()
 
         result: Dict[str, Any] = {"stepped": num_steps}
 
