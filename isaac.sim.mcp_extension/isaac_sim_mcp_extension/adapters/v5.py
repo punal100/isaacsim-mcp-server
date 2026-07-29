@@ -336,43 +336,62 @@ class IsaacAdapterV5(IsaacAdapterBase):
         if result != omni.client.Result.OK:
             return discovered
 
-        for mfr_entry in manufacturers:
-            mfr_name = mfr_entry.relative_path.rstrip("/")
-            mfr_path = robots_base + mfr_name + "/"
+        # The walk is ~150 directory listings deep in three levels. Run each
+        # level concurrently: the calls are network round-trips against the
+        # asset server, so they are latency bound, not CPU bound, and doing them
+        # one at a time costs ~28 s on a cold omni.client cache — during which
+        # kit's main loop is blocked and the whole app is frozen. Ordering is
+        # preserved by mapping over the input list, so the key-preference rules
+        # below behave exactly as they did sequentially.
+        def _list_dir(path: str):
+            try:
+                res, entries = omni.client.list(path)
+                return entries if res == omni.client.Result.OK else []
+            except Exception:
+                return []
 
-            result2, models = omni.client.list(mfr_path)
-            if result2 != omni.client.Result.OK:
-                continue
+        def _map(paths):
+            if len(paths) < 2:
+                return [_list_dir(p) for p in paths]
+            try:
+                from concurrent.futures import ThreadPoolExecutor
 
-            for model_entry in models:
-                model_name = model_entry.relative_path.rstrip("/")
-                model_path = mfr_path + model_name + "/"
+                with ThreadPoolExecutor(max_workers=min(16, len(paths))) as pool:
+                    return list(pool.map(_list_dir, paths))
+            except Exception:
+                # Any threading problem: fall back to the sequential walk.
+                return [_list_dir(p) for p in paths]
 
-                # Look for USD files directly in the model directory
-                result3, files = omni.client.list(model_path)
-                if result3 != omni.client.Result.OK:
+        mfr_names = [m.relative_path.rstrip("/") for m in manufacturers]
+        mfr_models = _map([robots_base + n + "/" for n in mfr_names])
+
+        # Flatten to (manufacturer, model) pairs, then list every model dir at once.
+        pairs = [
+            (mfr_name, model_entry.relative_path.rstrip("/"))
+            for mfr_name, models in zip(mfr_names, mfr_models)
+            for model_entry in models
+        ]
+        model_files = _map([f"{robots_base}{mfr}/{model}/" for mfr, model in pairs])
+
+        for (mfr_name, model_name), files in zip(pairs, model_files):
+            for file_entry in files:
+                fname = file_entry.relative_path
+                if not (fname.endswith(".usd") or fname.endswith(".usda")):
                     continue
+                asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
 
-                for file_entry in files:
-                    fname = file_entry.relative_path
-                    if not (fname.endswith(".usd") or fname.endswith(".usda")):
-                        continue
-                    # Skip variants with suffixes like _physx_lidar, _with_arm
-                    _base_name = fname.rsplit(".", 1)[0]
-                    asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
-
-                    # Use lowercase model name as key, prefer shorter/simpler names
-                    key = model_name.lower().replace(" ", "_")
-                    if key in discovered:
-                        # Keep the simpler filename (shorter name wins)
-                        if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
-                            discovered[key]["asset_path"] = asset_rel
-                    else:
-                        discovered[key] = {
-                            "asset_path": asset_rel,
-                            "description": f"{mfr_name} {model_name}",
-                            "manufacturer": mfr_name,
-                        }
+                # Use lowercase model name as key, prefer shorter/simpler names
+                key = model_name.lower().replace(" ", "_")
+                if key in discovered:
+                    # Keep the simpler filename (shorter name wins)
+                    if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
+                        discovered[key]["asset_path"] = asset_rel
+                else:
+                    discovered[key] = {
+                        "asset_path": asset_rel,
+                        "description": f"{mfr_name} {model_name}",
+                        "manufacturer": mfr_name,
+                    }
 
         return discovered
 
