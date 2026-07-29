@@ -999,18 +999,25 @@ class IsaacAdapterV5(IsaacAdapterBase):
         self._ensure_physics_world()
         timeline = omni.timeline.get_timeline_interface()
         resume_paused = not timeline.is_playing()
-        if resume_paused:
-            timeline.play()
-        try:
-            for _ in range(num_steps):
-                omni.kit.app.get_app().update()
-        finally:
+        # Running the timeline also evaluates Action Graphs, so a ScriptNode
+        # controller would re-command the robot on every stepped frame and
+        # silently discard the caller's set_joint_positions. Suspend graphs for
+        # the duration; play is the mode for driving them.
+        with self._graphs_suspended() as suspended:
             if resume_paused:
-                # Pause (not stop): stop would reset everything to the spawn
-                # pose and discard exactly the physics result being measured.
-                timeline.pause()
+                timeline.play()
+            try:
+                for _ in range(num_steps):
+                    omni.kit.app.get_app().update()
+            finally:
+                if resume_paused:
+                    # Pause (not stop): stop would reset everything to the spawn
+                    # pose and discard exactly the physics result being measured.
+                    timeline.pause()
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if suspended:
+            result["graphs_suspended"] = [str(p) for p in suspended]
 
         # Observe prim states
         if observe_prims:

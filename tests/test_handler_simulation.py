@@ -61,3 +61,64 @@ def test_step_runs_when_stopped():
 
     assert result["status"] == "success"
     adapter.step.assert_called_once()
+
+
+# ── Stepping must not evaluate Action Graphs ────────────────────────────────
+
+
+def test_step_suspends_action_graphs():
+    """Stepping runs the timeline, which fires OnPlaybackTick.
+
+    Without suspension a ScriptNode controller re-commands the robot on every
+    stepped frame, silently discarding the caller's set_joint_positions —
+    observed on 5.1, where the drive targets came back as RMPflow's output
+    instead of the commanded values, with no error raised anywhere. Verified
+    after the fix: all nine FR3 targets survive a 60-frame step.
+    """
+    import ast
+    import os
+
+    v5 = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+        "v5.py",
+    )
+    with open(v5) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "step":
+            src = ast.get_source_segment(text, node)
+    assert src, "v5 step() not found"
+    assert "_graphs_suspended" in src, "step must suspend Action Graphs while it runs the timeline"
+
+
+def test_graph_suspension_restores_state():
+    """Graphs must come back on, including when the step raises, and graphs the
+    caller had already disabled must be left alone."""
+    import ast
+    import os
+
+    base = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+        "base.py",
+    )
+    with open(base) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_graphs_suspended":
+            src = ast.get_source_segment(text, node)
+    assert src, "_graphs_suspended not found"
+    assert "finally:" in src, "restoration must survive an exception"
+    assert "set_disabled(False)" in src
+    assert "is_disabled()" in src, "already-disabled graphs must not be re-enabled"

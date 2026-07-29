@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
@@ -267,6 +268,47 @@ class IsaacAdapterBase(ABC):
         ...
 
     # ── Simulation ─────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def _graphs_suspended(self):
+        """Disable Action Graphs for the duration of a step, then restore them.
+
+        Stepping runs the timeline for the requested frames, which fires
+        OnPlaybackTick and evaluates every Action Graph. A ScriptNode controller
+        therefore re-commands the robot on every stepped frame and silently
+        overwrites whatever set_joint_positions just asked for — the caller sees
+        its own targets replaced by the controller's with no error anywhere.
+
+        The two debug modes are meant to stay separate: step on a frozen
+        timeline for the MCP loop, play for an Action-Graph run. Suspending the
+        graphs keeps that promise, and matches V6, whose SimulationManager.step
+        pumps only the physics pipeline.
+
+        Graphs the caller had already disabled are left alone, and everything is
+        restored even if the step raises.
+        """
+        suspended = []
+        try:
+            import omni.graph.core as og
+
+            graphs = og.get_all_graphs() if hasattr(og, "get_all_graphs") else []
+            for graph in graphs:
+                try:
+                    if not graph.is_disabled():
+                        graph.set_disabled(True)
+                        suspended.append(graph)
+                except Exception:
+                    continue
+        except Exception:
+            pass  # No OmniGraph in this runtime — nothing to suspend.
+        try:
+            yield [g.get_path_to_graph() for g in suspended] if suspended else []
+        finally:
+            for graph in suspended:
+                try:
+                    graph.set_disabled(False)
+                except Exception:
+                    pass
 
     def _stage_has_physics_scene(self) -> bool:
         """True when the stage carries at least one PhysicsScene prim."""
