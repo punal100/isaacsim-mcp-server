@@ -63,13 +63,20 @@ def create_physics(
     adapter: IsaacAdapterBase, gravity: Optional[Sequence[float]] = None, scene_name: str = "PhysicsScene"
 ) -> Dict[str, Any]:
     try:
-        scene_path = adapter.create_physics_scene(gravity=gravity, scene_name=scene_name)
-        # Create ground plane with collision so objects don't fall through
-        floor_path = "/World/groundPlane"
-        adapter.create_prim(floor_path, "Plane")
         from pxr import UsdPhysics
 
+        scene_path = adapter.create_physics_scene(gravity=gravity, scene_name=scene_name)
+        # Ground plane with collision so objects don't fall through. Only create
+        # it when missing: create_prim raises "A prim already exists at prim
+        # path" on a second call, and because the scene is established first the
+        # tool would report failure for work it had just completed — while
+        # naming groundPlane, which looks unrelated to the caller's request.
+        # Re-establishing a scene on a dirty stage is a normal thing to do, so
+        # this stays idempotent.
         stage = adapter.get_stage()
+        floor_path = "/World/groundPlane"
+        if not stage.GetPrimAtPath(floor_path).IsValid():
+            adapter.create_prim(floor_path, "Plane")
         gp = stage.GetPrimAtPath(floor_path)
         if gp.IsValid() and not gp.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI.Apply(gp)
