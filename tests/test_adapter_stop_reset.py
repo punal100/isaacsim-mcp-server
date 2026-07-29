@@ -50,7 +50,18 @@ def test_v6_stop_resets_physics():
     assert "stop()" in src  # still stops the timeline first
 
 
-def test_v5_stop_resets_physics():
+def test_v5_stop_stops_the_timeline_and_does_not_call_world_reset():
+    """V5 stop() must leave the timeline STOPPED.
+
+    timeline.stop() already restores rigid bodies / articulations to their spawn
+    pose (verified live on 5.1: a cube dropped from z=2 to z=0.1 returned to
+    exactly z=2 after stop_simulation). World.reset() is not needed for that and
+    actively breaks stop: it re-starts the timeline on a later frame, so
+    stop_simulation left the sim "playing" and step_simulation then refused to
+    run, making the step-only debug loop unusable.
+    """
     src = _stop_body_src("v5.py")
-    assert "reset" in src.lower()
-    assert "stop()" in src
+    # Ignore comments: only executable code counts.
+    code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    assert "stop()" in code
+    assert "world.reset()" not in code, "World.reset() re-starts the timeline; stop must leave the sim stopped"

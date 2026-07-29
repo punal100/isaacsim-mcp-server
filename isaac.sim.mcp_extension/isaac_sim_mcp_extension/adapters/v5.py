@@ -910,18 +910,16 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def stop(self) -> None:
         import omni.timeline
 
+        # timeline.stop() already restores rigid bodies / articulations to their
+        # spawn pose — it is what the Isaac UI Stop button does. Verified on 5.1:
+        # a cube dropped from z=2 to z=0.1 returns to exactly z=2 after this call.
+        #
+        # Do NOT add World.reset() here. It re-starts the timeline (verified:
+        # stop_simulation then reported "playing" with the time advancing), and
+        # the restart lands on a later frame, so stopping again immediately does
+        # not help. A stop that leaves the sim running makes step_simulation
+        # refuse to run and breaks the step-only debug loop.
         omni.timeline.get_timeline_interface().stop()
-        # Restore articulations / rigid bodies to their spawn pose (the state
-        # captured at first Play), matching the Isaac UI Stop button. Guarded so
-        # a scene with no World instance still stops cleanly.
-        try:
-            from isaacsim.core.api import World
-
-            world = World.instance()
-            if world is not None:
-                world.reset()
-        except Exception:
-            pass
 
     def step(
         self, num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
