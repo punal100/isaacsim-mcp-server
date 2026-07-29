@@ -366,10 +366,14 @@ class IsaacAdapterV5(IsaacAdapterBase):
         mfr_models = _map([robots_base + n + "/" for n in mfr_names])
 
         # Flatten to (manufacturer, model) pairs, then list every model dir at once.
+        # Skip hidden directories: every manufacturer keeps a ".thumbs" folder of
+        # "<model>.thumb.usd" preview files, which otherwise register as a robot
+        # named ".thumbs" pointing at a thumbnail.
         pairs = [
             (mfr_name, model_entry.relative_path.rstrip("/"))
             for mfr_name, models in zip(mfr_names, mfr_models)
             for model_entry in models
+            if not model_entry.relative_path.lstrip("/").startswith(".")
         ]
         model_files = _map([f"{robots_base}{mfr}/{model}/" for mfr, model in pairs])
 
@@ -378,14 +382,24 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 fname = file_entry.relative_path
                 if not (fname.endswith(".usd") or fname.endswith(".usda")):
                     continue
+                if fname.endswith(".thumb.usd"):
+                    continue  # preview image, not a robot
                 asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
 
                 # Use lowercase model name as key, prefer shorter/simpler names
                 key = model_name.lower().replace(" ", "_")
                 if key in discovered:
-                    # Keep the simpler filename (shorter name wins)
+                    # Keep the simpler filename (shorter name wins). Rewrite the
+                    # whole record, not just the path: two manufacturers can ship
+                    # the same model directory name, and updating the path alone
+                    # left entries describing one vendor while pointing at
+                    # another's asset.
                     if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
-                        discovered[key]["asset_path"] = asset_rel
+                        discovered[key] = {
+                            "asset_path": asset_rel,
+                            "description": f"{mfr_name} {model_name}",
+                            "manufacturer": mfr_name,
+                        }
                 else:
                     discovered[key] = {
                         "asset_path": asset_rel,
