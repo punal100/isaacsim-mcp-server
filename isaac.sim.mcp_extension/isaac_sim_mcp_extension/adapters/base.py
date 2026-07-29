@@ -268,6 +268,16 @@ class IsaacAdapterBase(ABC):
 
     # ── Simulation ─────────────────────────────────────────
 
+    def _stage_has_physics_scene(self) -> bool:
+        """True when the stage carries at least one PhysicsScene prim."""
+        try:
+            for prim in self.get_stage().Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    return True
+        except Exception:
+            return False
+        return False
+
     def _resync_physics_scene_cache(self) -> None:
         """Rebuild SimulationManager's PhysxSceneAPI cache from the live stage.
 
@@ -313,6 +323,21 @@ class IsaacAdapterBase(ABC):
             from isaacsim.core.api import World
         except ImportError:
             return  # Non-v5 runtimes may not have isaacsim.core.api
+
+        # Initialising physics before the stage has a PhysicsScene builds a
+        # simulation view with no articulation data, and adding a scene later
+        # does NOT rebuild it. Every subsequent SingleArticulation.initialize()
+        # then fails with "'NoneType' object has no attribute 'link_names'", so
+        # create_robot silently returns without joint_names / num_dof / warnings
+        # and the process cannot recover — verified on 5.1, where even deleting
+        # the scene and rebuilding World did not restore it.
+        #
+        # Any tool can warm physics (execute_script, step, play), so the damage
+        # depends purely on call order. There is nothing meaningful to
+        # initialise without a scene, so do nothing and let create_physics_scene
+        # (or the caller) establish one first.
+        if not self._stage_has_physics_scene():
+            return
 
         def _prepare(world):
             """Build the World if absent and make sure physics is initialised."""

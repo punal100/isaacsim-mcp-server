@@ -149,3 +149,27 @@ def test_recovery_resyncs_simulation_manager_scene_cache():
         if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
             src = ast.get_source_segment(text, node)
     assert "_resync_physics_scene_cache" in src, "resync must run on the recovery path"
+
+
+def test_physics_warm_skipped_without_a_scene():
+    """Initialising physics before a PhysicsScene exists poisons the session.
+
+    The simulation view is built with no articulation data and is not rebuilt
+    when a scene is added later, so SingleArticulation.initialize() fails with
+    "'NoneType' object has no attribute 'link_names'" for the rest of the
+    process — create_robot then silently drops joint_names/num_dof/warnings.
+    Any tool can warm physics, so this depends purely on call order.
+    """
+    import ast
+    import os
+
+    base = os.path.join(ADAPTERS, "base.py")
+    with open(base) as f:
+        text = f.read()
+    assert "_stage_has_physics_scene" in text
+    tree = ast.parse(text)
+    src = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
+            src = ast.get_source_segment(text, node)
+    assert "_stage_has_physics_scene" in src, "must skip warming when the stage has no PhysicsScene"
