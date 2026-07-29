@@ -178,6 +178,9 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         """Diagnostic tool: get physics state for a prim.
 
         Returns rigid body status, mass, velocities, kinematic flag, and collision info.
+        Velocity units: linear_velocity in m/s, angular_velocity in rad/s.
+        Velocities are only non-zero once the simulation has advanced — step the
+        simulation (or play) before reading them.
         Call this when:
         - Objects fall through the ground (check collision enabled)
         - Objects don't move when expected (check is_kinematic, mass)

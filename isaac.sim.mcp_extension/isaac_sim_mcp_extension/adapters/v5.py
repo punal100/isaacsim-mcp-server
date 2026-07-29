@@ -719,24 +719,50 @@ class IsaacAdapterV5(IsaacAdapterBase):
         has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
         result["collision_enabled"] = has_collision
 
-        # Get velocities from PhysX runtime API (not USD attributes which may be stale)
+        # Velocities come from the physics:* attributes, which PhysX writes back
+        # every simulated frame.
+        #
+        # This used to read omni.physx get_rigidbody_transformation(), but that
+        # call only returns {position, rotation, ret_val} — there is no velocity
+        # in the payload, so `.get("linear_velocity", (0, 0, 0))` silently
+        # returned zeros on every call and a moving body was indistinguishable
+        # from one at rest. Verified against a cube falling at 15 m/s: the physx
+        # call had no velocity key while physics:velocity read [0, 0, -15.042].
+        #
+        # Units: physics:velocity is m/s. physics:angularVelocity is deg/s in USD,
+        # converted to rad/s here so angular values match the radians this API
+        # uses everywhere else (joint positions, limits).
         if has_rb:
+            result["linear_velocity"] = [0.0, 0.0, 0.0]
+            result["angular_velocity"] = [0.0, 0.0, 0.0]
             try:
-                import omni.physx
-
-                physx = omni.physx.get_physx_interface()
-                rb_data = physx.get_rigidbody_transformation(prim_path)
-                if rb_data and rb_data.get("ret_val", False):
-                    vel = rb_data.get("linear_velocity", (0.0, 0.0, 0.0))
-                    ang_vel = rb_data.get("angular_velocity", (0.0, 0.0, 0.0))
-                    result["linear_velocity"] = [float(vel[0]), float(vel[1]), float(vel[2])]
-                    result["angular_velocity"] = [float(ang_vel[0]), float(ang_vel[1]), float(ang_vel[2])]
-                else:
-                    result["linear_velocity"] = [0.0, 0.0, 0.0]
-                    result["angular_velocity"] = [0.0, 0.0, 0.0]
+                lin = prim.GetAttribute("physics:velocity")
+                if lin and lin.Get() is not None:
+                    result["linear_velocity"] = [float(v) for v in lin.Get()]
+                ang = prim.GetAttribute("physics:angularVelocity")
+                if ang and ang.Get() is not None:
+                    result["angular_velocity"] = [float(np.radians(v)) for v in ang.Get()]
             except Exception:
-                result["linear_velocity"] = [0.0, 0.0, 0.0]
-                result["angular_velocity"] = [0.0, 0.0, 0.0]
+                pass
+            # PhysX only writes these attributes back while /physics/updateToUsd
+            # and /physics/updateVelocitiesToUsd are enabled (both default on).
+            # If either is off, the reads above stay at zero — say so rather than
+            # reporting a moving body as stationary, which is the silent failure
+            # this code path used to have.
+            try:
+                import carb
+
+                settings = carb.settings.get_settings()
+                if settings.get("/physics/updateToUsd") is False or (
+                    settings.get("/physics/updateVelocitiesToUsd") is False
+                ):
+                    result["velocity_warning"] = (
+                        "physics USD write-back is disabled (/physics/updateToUsd or "
+                        "/physics/updateVelocitiesToUsd is false), so velocities read as zero "
+                        "regardless of actual motion."
+                    )
+            except Exception:
+                pass
 
         # Get contact info if available
         try:
