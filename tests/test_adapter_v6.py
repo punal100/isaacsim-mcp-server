@@ -289,6 +289,66 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     assert state["timeline_state"] == "stopped"
 
 
+def test_v6_engine_is_read_live_not_cached_at_construction(monkeypatch):
+    """The engine must track SimulationManager, not a snapshot from __init__.
+
+    Under isaac-sim.newton.sh the Newton backend registers ~2.7s AFTER this
+    extension starts (measured on 6.0.1: mcp_extension at 3.978s,
+    isaacsim.physics.newton at 6.649s), so at construction time the manager
+    still reports the "physx" default. Caching there pins the adapter to the
+    wrong backend for the whole session.
+    """
+    engine = {"value": "physx"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {"get_active_physics_engine": classmethod(lambda cls: engine["value"])},
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.1"))
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    assert adapter._engine == "physx"
+
+    # Newton registers late in the boot sequence.
+    engine["value"] = "newton"
+    assert adapter._engine == "newton"
+
+
+def test_v6_engine_reports_unknown_when_simulation_manager_is_unavailable(monkeypatch):
+    """A missing/failing SimulationManager degrades to "unknown", never raises."""
+
+    class _Broken:
+        @classmethod
+        def get_active_physics_engine(cls):
+            raise RuntimeError("no manager")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(SimulationManager=_Broken),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.1"))
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    assert v6_mod.IsaacAdapterV6()._engine == "unknown"
+
+
 def test_v6_import_urdf_uses_urdf_importer_class(monkeypatch, tmp_path):
     urdf_file = tmp_path / "robot.urdf"
     urdf_file.write_text("<robot name='r'/>")

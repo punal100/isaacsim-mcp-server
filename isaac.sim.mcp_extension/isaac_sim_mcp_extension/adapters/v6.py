@@ -74,12 +74,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
     def __init__(self) -> None:
         super().__init__()
-        try:
-            from isaacsim.core.simulation_manager import SimulationManager
-
-            self._engine = SimulationManager.get_active_physics_engine()
-        except Exception:
-            self._engine = "unknown"
+        # The active engine is deliberately NOT captured here — see _engine.
         try:
             from isaacsim.core.version import get_version
 
@@ -118,6 +113,30 @@ class IsaacAdapterV6(IsaacAdapterBase):
             )
         except Exception:
             pass
+
+    @property
+    def _engine(self) -> str:
+        """Active physics backend: "physx" | "newton" | "remotesim" | "unknown".
+
+        Read live on every access — never cached at construction time. Under the
+        Newton kit the engine is still reported as the `physx` default while this
+        extension is starting up: `isaacsim.physics.newton` registers the Newton
+        backend later in the boot sequence. Measured on Isaac Sim 6.0.1 with
+        isaac-sim.newton.sh:
+
+            [3.978s] ext: isaac.sim.mcp_extension   <- adapter constructed here
+            [6.649s] ext: isaacsim.physics.newton   <- engine becomes "newton"
+
+        A value captured in __init__ therefore reports "physx" for the entire
+        session under Newton, which is wrong in get_simulation_state and would
+        silently mis-route any future backend-specific branch.
+        """
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            return SimulationManager.get_active_physics_engine()
+        except Exception:
+            return "unknown"
 
     # ── Scene ──────────────────────────────────────────────
 
