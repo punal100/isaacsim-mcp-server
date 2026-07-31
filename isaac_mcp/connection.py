@@ -50,9 +50,48 @@ class IsaacConnection:
 
     sock: Optional[socket.socket] = field(default=None, repr=False)
 
+    def _peer_is_gone(self) -> bool:
+        """True when the cached socket's peer has already closed it.
+
+        This connection outlives the Isaac Sim process it was dialled to: the
+        MCP server keeps running across Kit restarts, so `self.sock` routinely
+        refers to a Kit that has exited. Peeking without consuming distinguishes
+        "nothing to read yet" (BlockingIOError — healthy idle socket) from "FIN
+        received" (b"" — peer gone).
+
+        Checked *before* sending rather than retrying after a failure, because a
+        retry cannot tell whether Isaac already executed the command; replaying
+        a create_robot or a delete would be worse than the error it fixes.
+        """
+        if self.sock is None:
+            return True
+        previous_timeout = self.sock.gettimeout()
+        try:
+            # settimeout(0) — not MSG_DONTWAIT alone. send_command leaves a 300s
+            # timeout on the socket, and CPython waits for readability using that
+            # timeout before issuing the syscall, so the flag alone would block
+            # for five minutes on a healthy idle connection instead of answering
+            # immediately. Non-blocking mode makes the probe unconditionally cheap.
+            self.sock.settimeout(0)
+            return self.sock.recv(1, socket.MSG_PEEK) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        finally:
+            try:
+                self.sock.settimeout(previous_timeout)
+            except OSError:
+                pass
+
     def connect(self) -> bool:
         if self.sock:
-            return True
+            if not self._peer_is_gone():
+                return True
+            # Isaac Sim restarted under us — drop the dead socket and redial so
+            # the caller does not eat a spurious "connection closed" error.
+            logger.info("Cached Isaac connection is stale; reconnecting")
+            self.disconnect()
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((self.host, self.port))
@@ -107,7 +146,8 @@ class IsaacConnection:
         raise Exception("No data received")
 
     def send_command(self, command_type: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        if not self.sock and not self.connect():
+        # connect() also validates a cached socket, so always route through it.
+        if not self.connect():
             raise ConnectionError("Not connected to Isaac")
 
         command = {"type": command_type, "params": params or {}}
