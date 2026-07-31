@@ -70,9 +70,15 @@ def get_adapter():
     """Return the appropriate adapter for the current Isaac Sim version.
 
     Selects ``IsaacAdapterV6`` when the runtime reports major version >= 6,
-    ``IsaacAdapterV5`` otherwise (including detection failure, which is safe
-    under 5.1 and produces a clear ImportError under 6.0 Newton — directing
-    the user to upgrade).
+    ``IsaacAdapterV5`` otherwise — including detection failure, which falls back
+    to V5.
+
+    That fallback is safe on 5.1. On 6.0 it degrades quietly rather than loudly:
+    verified on 6.0.1 under isaac-sim.newton.sh, the legacy extensions V5 imports
+    (``isaacsim.core.api`` / ``.prims`` / ``.utils``, ``isaacsim.sensors.camera``,
+    ``omni.physx``) are all enabled and every V5 import succeeds, so a
+    misdetected V6 runtime yields a working-but-legacy adapter, not an
+    ImportError. Detection failure is therefore worth logging on its own.
     """
     if _detect_isaacsim_major_version() >= 6:
         from .v6 import IsaacAdapterV6
