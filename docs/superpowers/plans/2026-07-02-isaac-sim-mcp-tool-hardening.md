@@ -61,9 +61,9 @@ def test_create_object_documents_scale_multiplier():
     src = _read_tool_source("objects.py")
     # scale= is a raw multiplier of the primitive's native size
     assert "native size" in src
-    assert "2 m" in src or "2m" in src           # native size of Cube/Sphere/etc
-    assert "scale=0.5" in src                     # worked example -> 1 m
-    assert "size=" in src                         # steer to size= for absolute meters
+    assert "2 m" in src or "2m" in src  # native size of Cube/Sphere/etc
+    assert "scale=0.5" in src  # worked example -> 1 m
+    assert "size=" in src  # steer to size= for absolute meters
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -354,8 +354,11 @@ import ast
 import os
 
 ADAPTERS = os.path.join(
-    os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension", "adapters",
+    os.path.dirname(__file__),
+    "..",
+    "isaac.sim.mcp_extension",
+    "isaac_sim_mcp_extension",
+    "adapters",
 )
 
 
@@ -498,8 +501,11 @@ import ast
 import os
 
 HANDLERS = os.path.join(
-    os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension", "handlers",
+    os.path.dirname(__file__),
+    "..",
+    "isaac.sim.mcp_extension",
+    "isaac_sim_mcp_extension",
+    "handlers",
 )
 
 
@@ -595,6 +601,7 @@ Add to `tests/test_tool_docstrings.py`:
 ```python
 def test_create_action_graph_has_inline_script_param():
     import ast
+
     src = _read_tool_source("graphs.py")
     tree = ast.parse(src)
     for node in ast.walk(tree):
@@ -698,13 +705,17 @@ def test_force_recompile_helper_exists_and_is_reused():
 def test_reload_script_scans_scriptnodes_by_scriptpath():
     for fname in ("v6.py", "v5.py"):
         path = os.path.join(
-            os.path.dirname(__file__), "..", "isaac.sim.mcp_extension",
-            "isaac_sim_mcp_extension", "adapters", fname,
+            os.path.dirname(__file__),
+            "..",
+            "isaac.sim.mcp_extension",
+            "isaac_sim_mcp_extension",
+            "adapters",
+            fname,
         )
         with open(path) as f:
             src = f.read()
-        assert "inputs:scriptPath" in src            # reload matches nodes by their file
-        assert "force_recompile_scriptnode" in src   # and recompiles them
+        assert "inputs:scriptPath" in src  # reload matches nodes by their file
+        assert "force_recompile_scriptnode" in src  # and recompiles them
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -922,9 +933,9 @@ def test_get_logs_default_is_non_destructive(monkeypatch):
     monkeypatch.setattr(sim, "_log_buffer", ["x", "y"], raising=False)
     monkeypatch.setattr(sim, "_play_boundary", 0, raising=False)
     monkeypatch.setattr(sim, "_ensure_log_listener", lambda: None)
-    result = sim.get_logs(adapter=None)          # defaults: clear=False
+    result = sim.get_logs(adapter=None)  # defaults: clear=False
     assert result["logs"] == ["x", "y"]
-    assert sim._log_buffer == ["x", "y"]          # buffer intact
+    assert sim._log_buffer == ["x", "y"]  # buffer intact
 
 
 def test_append_and_mark_boundary_scopes_new_run(monkeypatch):
@@ -999,8 +1010,9 @@ def _ensure_log_listener():
     _log_listener_active = True
 
 
-def get_logs(adapter: IsaacAdapterBase, clear: bool = False, count: int = 100,
-             since_last_play: bool = True) -> Dict[str, Any]:
+def get_logs(
+    adapter: IsaacAdapterBase, clear: bool = False, count: int = 100, since_last_play: bool = True
+) -> Dict[str, Any]:
     """Return recent WARN/ERROR + [PRINT] log messages, scoped to the current run."""
     try:
         _ensure_log_listener()
@@ -1082,11 +1094,12 @@ Add to `tests/test_tool_docstrings.py`:
 ```python
 def test_get_isaac_logs_has_since_last_play_and_nondestructive_default():
     import ast
+
     src = _read_tool_source("simulation.py")
     tree = ast.parse(src)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "get_isaac_logs":
-            defaults = {a.arg: d for a, d in zip(node.args.args[-len(node.args.defaults):], node.args.defaults)}
+            defaults = {a.arg: d for a, d in zip(node.args.args[-len(node.args.defaults) :], node.args.defaults)}
             assert "since_last_play" in {a.arg for a in node.args.args}
             # clear defaults to False (non-destructive)
             clear_default = defaults.get("clear")
@@ -1171,10 +1184,10 @@ def test_execute_script_warns_about_live_graph():
 
 def test_server_instructions_cover_contracts():
     src = _read_server_source()
-    assert "resets to spawn" in src.lower() or "spawn state" in src.lower()   # stop (#8)
-    assert "[PRINT]" in src                                                    # log capture (#5)
-    assert "silently" in src.lower()                                           # execute_script (#6)
-    assert "silent" in src.lower()                                             # ScriptNode write failures
+    assert "resets to spawn" in src.lower() or "spawn state" in src.lower()  # stop (#8)
+    assert "[PRINT]" in src  # log capture (#5)
+    assert "silently" in src.lower()  # execute_script (#6)
+    assert "silent" in src.lower()  # ScriptNode write failures
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

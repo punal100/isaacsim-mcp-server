@@ -33,7 +33,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pre-commit",
-    "ruff",
+    "ruff==0.16.1",  # keep in sync with CI and .pre-commit-config.yaml
     "pytest",
 ]
 
