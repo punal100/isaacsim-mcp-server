@@ -178,6 +178,9 @@ def test_v6_ensure_physics_world_calls_simulation_manager(monkeypatch):
 
     importlib.reload(v6_mod)
     adapter = v6_mod.IsaacAdapterV6()
+    # Physics warming is guarded on a live stage (see
+    # test_v6_never_warms_physics_without_a_stage), so provide one.
+    monkeypatch.setattr(adapter, "get_stage", lambda: object())
     adapter._ensure_physics_world()
     assert ("setup_simulation", 1.0 / 60.0) in sm_calls
     assert ("initialize_physics",) in sm_calls
@@ -439,3 +442,64 @@ def test_get_simulation_state_detects_physics_scene_with_isa():
             src = f.read()
         assert "IsA(UsdPhysics.Scene)" in src, f"{fname}: physics-scene check must use IsA"
         assert "HasAPI(UsdPhysics.Scene)" not in src, f"{fname}: HasAPI never matches a typed schema"
+
+
+def _v6_with_stub_simulation_manager(monkeypatch, calls):
+    """Build a V6 adapter whose SimulationManager records calls instead of running."""
+
+    class _SM:
+        @classmethod
+        def get_active_physics_engine(cls):
+            return "physx"
+
+        @classmethod
+        def _cleanup_stale_physics_scenes(cls):
+            calls.append("cleanup")
+
+        @classmethod
+        def setup_simulation(cls, dt=None, device=None):
+            calls.append("setup_simulation")
+
+        @classmethod
+        def initialize_physics(cls):
+            calls.append("initialize_physics")
+
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", types.SimpleNamespace(SimulationManager=_SM))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.1"))
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    return v6_mod.IsaacAdapterV6()
+
+
+def test_v6_never_warms_physics_without_a_stage(monkeypatch):
+    """setup_simulation() on a null stage is a native abort that kills Kit.
+
+    Kit accepts MCP commands ~2.86s before it creates the USD stage (measured on
+    6.0.1). setup_simulation() dereferences that stage in C++, so calling it in
+    that window raises no Python exception — it prints
+    "[Fatal] [omni.usd] attempted member lookup on NULL TfWeakPtr<UsdStage>" and
+    aborts the process. It must never be reached without a stage.
+    """
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: None)
+
+    adapter._ensure_physics_world()
+
+    assert calls == [], f"physics was warmed with no stage: {calls}"
+
+
+def test_v6_warms_physics_once_a_stage_exists(monkeypatch):
+    """The guard must not disable normal warming — only the no-stage case."""
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: object())
+
+    adapter._ensure_physics_world()
+
+    assert "setup_simulation" in calls
+    assert "initialize_physics" in calls

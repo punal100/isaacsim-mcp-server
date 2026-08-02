@@ -686,6 +686,25 @@ class IsaacAdapterV6(IsaacAdapterBase):
         """
         from isaacsim.core.simulation_manager import SimulationManager
 
+        # Do nothing until the stage exists. setup_simulation() dereferences the
+        # USD stage in native code, and Kit starts accepting MCP commands before
+        # it has created one — measured on 6.0.1: the socket opens at [4.0s] and
+        # the stage appears 2.86s later. A command landing in that window kills
+        # the entire process:
+        #
+        #     [Fatal] [omni.usd] attempted member lookup on NULL TfWeakPtr<UsdStage>
+        #
+        # That is a native abort, not a Python exception, so it cannot be caught
+        # — it has to be prevented. Reproduced 3/3 with any early execute_script,
+        # including one whose body was just `print('hi')`, because this runs
+        # before the submitted code does.
+        # get_stage() can also raise while omni.usd is still coming up, so treat
+        # "no stage" and "cannot ask yet" identically.
+        try:
+            if self.get_stage() is None:
+                return
+        except Exception:
+            return
         try:
             SimulationManager._cleanup_stale_physics_scenes()
         except Exception:
