@@ -503,3 +503,125 @@ def test_v6_warms_physics_once_a_stage_exists(monkeypatch):
 
     assert "setup_simulation" in calls
     assert "initialize_physics" in calls
+
+
+def _install_fake_omni(monkeypatch, timeline, app):
+    """Publish fake omni.timeline / omni.kit.app.
+
+    `import omni.timeline` reads the attribute off the parent `omni` package, so
+    patching sys.modules alone is not enough with conftest's omni stub.
+    """
+    fake_timeline = types.ModuleType("omni.timeline")
+    fake_timeline.get_timeline_interface = lambda: timeline
+    fake_app_mod = types.ModuleType("omni.kit.app")
+    fake_app_mod.get_app = lambda: app
+    fake_kit = types.ModuleType("omni.kit")
+    fake_kit.app = fake_app_mod
+    fake_omni = types.ModuleType("omni")
+    fake_omni.timeline = fake_timeline
+    fake_omni.kit = fake_kit
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline)
+    monkeypatch.setitem(sys.modules, "omni.kit", fake_kit)
+    monkeypatch.setitem(sys.modules, "omni.kit.app", fake_app_mod)
+
+
+def test_v6_step_runs_the_timeline_like_v5(monkeypatch):
+    """V6.step must drive the timeline, not SimulationManager.step(steps=N).
+
+    Advancing physics without ever playing means PhysX never captures a spawn
+    state, so stop_simulation cannot reset (measured on 6.0.1: a cube stepped
+    from z=2 to the ground stayed there), and the timeline clock never moves so
+    current_time reports 0.0 forever.
+    """
+    events = []
+
+    class _Timeline:
+        def is_playing(self):
+            return False
+
+        def play(self):
+            events.append("play")
+
+        def pause(self):
+            events.append("pause")
+
+    class _App:
+        def update(self):
+            events.append("update")
+
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: object())
+
+    _install_fake_omni(monkeypatch, _Timeline(), _App())
+
+    result = adapter.step(num_steps=4)
+
+    assert result["stepped"] == 4
+    assert events == ["play", "update", "update", "update", "update", "pause"]
+    # SimulationManager.step must not be used for advancing.
+    assert "step" not in calls
+
+
+def test_v6_step_suspends_action_graphs(monkeypatch):
+    """Playing the timeline ticks OnPlaybackTick graphs, which would re-command
+    the robot and discard the caller's set_joint_positions (V5 bug e3e555c).
+    V6 did not need this while it bypassed the timeline; now it does."""
+    import contextlib
+
+    entered = []
+
+    class _Timeline:
+        def is_playing(self):
+            return False
+
+        def play(self):
+            pass
+
+        def pause(self):
+            pass
+
+    class _App:
+        def update(self):
+            pass
+
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: object())
+
+    @contextlib.contextmanager
+    def _fake_suspend():
+        entered.append("suspended")
+        yield ["/World/Graph"]
+
+    monkeypatch.setattr(adapter, "_graphs_suspended", _fake_suspend)
+
+    _install_fake_omni(monkeypatch, _Timeline(), _App())
+
+    result = adapter.step(num_steps=1)
+
+    assert entered == ["suspended"], "step must suspend Action Graphs while the timeline runs"
+    assert result["graphs_suspended"] == ["/World/Graph"]
+
+
+def test_v6_stop_does_not_call_a_nonexistent_reset_api():
+    """SimulationManager.reset_simulation() does not exist on 6.0.1.
+
+    It used to be called inside a bare except, so every stop_simulation raised
+    AttributeError internally, swallowed it, and reported success.
+    """
+    import os
+
+    src = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+        "v6.py",
+    )
+    with open(src) as f:
+        body = f.read()
+    call_sites = [ln for ln in body.splitlines() if "reset_simulation()" in ln and not ln.strip().startswith("#")]
+    assert call_sites == [], f"v6 calls a non-existent API: {call_sites}"

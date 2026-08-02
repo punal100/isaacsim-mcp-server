@@ -982,16 +982,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
     def stop(self) -> None:
         import omni.timeline
 
+        # timeline.stop() already restores rigid bodies / articulations to their
+        # spawn pose — it is what the Isaac UI Stop button does. Verified on
+        # 6.0.1: a cube dropped from z=2 returns to exactly z=2 after this call.
+        #
+        # There used to be a SimulationManager.reset_simulation() here. That
+        # method does not exist on 6.0.1 — the call raised
+        # "type object 'SimulationManager' has no attribute 'reset_simulation'"
+        # on every stop and a bare except swallowed it, so stop_simulation
+        # reported success while doing nothing beyond the line above. Do not
+        # reintroduce it without checking the API actually exists.
         omni.timeline.get_timeline_interface().stop()
-        # Restore articulations / rigid bodies to their spawn pose (the state
-        # captured at first Play), matching the Isaac UI Stop button. Guarded so
-        # a scene with no initialised physics still stops cleanly.
-        try:
-            from isaacsim.core.simulation_manager import SimulationManager
-
-            SimulationManager.reset_simulation()
-        except Exception:
-            pass
 
     def step(
         self,
@@ -999,16 +1000,50 @@ class IsaacAdapterV6(IsaacAdapterBase):
         observe_prims: Optional[List[str]] = None,
         observe_joints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        # SimulationManager.step pumps only the physics pipeline (no asyncio
-        # event-loop reentry), which avoids the "Cannot enter into task" errors
-        # that omni.kit.app.update() triggers when called from inside the MCP
-        # dispatch coroutine on Kit 107 (Isaac Sim 6.0).
-        from isaacsim.core.simulation_manager import SimulationManager
+        # Run the timeline for exactly num_steps frames, then freeze again —
+        # identical to V5, so both adapters give the caller the same contract.
+        #
+        # This deliberately does NOT use SimulationManager.step(steps=N), which
+        # advances physics without ever starting the timeline. That looks
+        # equivalent (it does advance physics by exactly N frames) but has two
+        # consequences measured on 6.0.1:
+        #   * PhysX captures its spawn state on Play, so a run that never played
+        #     has nothing to restore and stop_simulation silently does nothing —
+        #     a cube stepped from z=2 down to the ground stayed there.
+        #   * The timeline clock never moves, so get_simulation_state reports
+        #     current_time = 0.0 forever no matter how far the sim has run.
+        #
+        # The comment this replaced justified SimulationManager.step by claiming
+        # omni.kit.app.update() raises "Cannot enter into task" when called from
+        # inside the MCP dispatch coroutine on Kit 107. That does not reproduce
+        # on 6.0.1: update() from inside a dispatched execute_script succeeds,
+        # and this sequence lands the probe cube at z=0.73287 against a
+        # semi-implicit-Euler prediction of 0.73287 for 30 frames.
+        import omni.kit.app
+        import omni.timeline
 
         self._ensure_physics_world()
-        SimulationManager.step(steps=num_steps)
+        timeline = omni.timeline.get_timeline_interface()
+        resume_paused = not timeline.is_playing()
+        # Running the timeline also evaluates Action Graphs, so a ScriptNode
+        # controller would re-command the robot on every stepped frame and
+        # silently discard the caller's set_joint_positions. Suspend graphs for
+        # the duration; play is the mode for driving them.
+        with self._graphs_suspended() as suspended:
+            if resume_paused:
+                timeline.play()
+            try:
+                for _ in range(num_steps):
+                    omni.kit.app.get_app().update()
+            finally:
+                if resume_paused:
+                    # Pause (not stop): stop would reset everything to the spawn
+                    # pose and discard exactly the physics result being measured.
+                    timeline.pause()
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if suspended:
+            result["graphs_suspended"] = [str(p) for p in suspended]
 
         if observe_prims:
             from pxr import UsdPhysics
