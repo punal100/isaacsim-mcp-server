@@ -26,18 +26,32 @@
 import ast
 import os
 
-V5 = os.path.join(
-    os.path.dirname(__file__),
-    "..",
-    "isaac.sim.mcp_extension",
-    "isaac_sim_mcp_extension",
-    "adapters",
-    "v5.py",
-)
+import pytest
 
 
-def _discover_src():
-    with open(V5) as f:
+def _adapter_src(name):
+    return os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+        name,
+    )
+
+
+V5 = _adapter_src("v5.py")
+V6 = _adapter_src("v6.py")
+
+# Both adapters walk the same asset server and must behave identically. V6
+# originally shipped a plain nested-loop walk without either guard: on 6.0.1 it
+# took 45.12s (blocking kit's main loop) and listed ".thumbs" as a robot.
+ADAPTERS = [("v5", V5, "IsaacAdapterV5"), ("v6", V6, "IsaacAdapterV6")]
+ADAPTER_IDS = [a[0] for a in ADAPTERS]
+
+
+def _discover_src(path=V5):
+    with open(path) as f:
         text = f.read()
     tree = ast.parse(text)
     for node in ast.walk(tree):
@@ -46,24 +60,28 @@ def _discover_src():
     raise AssertionError("discover_robots not found")
 
 
-def test_walk_is_concurrent():
-    """~150 sequential listings cost ~28 s on a cold cache and block kit's main
-    loop for the whole time. The calls are latency bound, so they must overlap."""
-    src = _discover_src()
+@pytest.mark.parametrize("path", [V5, V6], ids=["v5", "v6"])
+def test_walk_is_concurrent(path):
+    """Sequential listings cost ~28s (5.1) / ~45s (6.0.1) on a cold cache and
+    block kit's main loop for the whole time. The calls are latency bound, so
+    they must overlap."""
+    src = _discover_src(path)
     assert "ThreadPoolExecutor" in src
 
 
-def test_walk_falls_back_to_sequential():
+@pytest.mark.parametrize("path", [V5, V6], ids=["v5", "v6"])
+def test_walk_falls_back_to_sequential(path):
     """If threads are unavailable the walk must still work, just slower."""
-    src = _discover_src()
+    src = _discover_src(path)
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     assert code.count("_list_dir(p) for p in paths") >= 2, "needs a sequential fallback path"
 
 
-def test_ordering_preserved_for_key_preference():
+@pytest.mark.parametrize("path", [V5, V6], ids=["v5", "v6"])
+def test_ordering_preserved_for_key_preference(path):
     """Results are zipped back against the input order, because the 'shorter
     filename wins' rule depends on deterministic iteration order."""
-    src = _discover_src()
+    src = _discover_src(path)
     assert "zip(pairs, model_files)" in src
     assert "zip(mfr_names, mfr_models)" in src
 
@@ -95,7 +113,8 @@ def _fake_client(tree):
     return mod
 
 
-def _run_discovery(monkeypatch, tree):
+def _run_discovery(monkeypatch, tree, cls_name="IsaacAdapterV5"):
+    import importlib
     import sys
     import types
 
@@ -112,19 +131,19 @@ def _run_discovery(monkeypatch, tree):
         if storage is not None:
             monkeypatch.setattr(storage, "native", native, raising=False)
 
-    from isaac_sim_mcp_extension.adapters.v5 import IsaacAdapterV5
+    module = "v5" if cls_name.endswith("V5") else "v6"
+    mod = importlib.import_module(f"isaac_sim_mcp_extension.adapters.{module}")
+    return getattr(mod, cls_name)().discover_robots()
 
-    return IsaacAdapterV5().discover_robots()
 
-
-def test_hidden_thumbnail_directories_are_not_robots():
+@pytest.mark.parametrize("cls_name", ["IsaacAdapterV5", "IsaacAdapterV6"], ids=ADAPTER_IDS)
+def test_hidden_thumbnail_directories_are_not_robots(cls_name):
     """Every manufacturer ships a .thumbs folder of <model>.thumb.usd previews.
 
     Unfiltered they registered as a robot literally named ".thumbs" whose
-    asset_path pointed at a thumbnail — observed on Isaac Sim 5.1.
+    asset_path pointed at a thumbnail — observed on Isaac Sim 5.1 and again on
+    6.0.1, where discovery returned 208 entries of which one was ".thumbs".
     """
-    import pytest
-
     tree = {
         "ROOT/Isaac/Robots/": ["ANYbotics/", "Idealworks/"],
         "ROOT/Isaac/Robots/ANYbotics/": [".thumbs/", ".cache/", "anymal_c/"],
@@ -139,7 +158,7 @@ def test_hidden_thumbnail_directories_are_not_robots():
     }
     mp = pytest.MonkeyPatch()
     try:
-        robots = _run_discovery(mp, tree)
+        robots = _run_discovery(mp, tree, cls_name)
     finally:
         mp.undo()
 
@@ -149,14 +168,13 @@ def test_hidden_thumbnail_directories_are_not_robots():
     assert set(robots) == {"anymal_c", "iwhub"}
 
 
-def test_colliding_model_names_keep_a_consistent_record():
+@pytest.mark.parametrize("cls_name", ["IsaacAdapterV5", "IsaacAdapterV6"], ids=ADAPTER_IDS)
+def test_colliding_model_names_keep_a_consistent_record(cls_name):
     """Two vendors can ship the same directory name.
 
     The "shorter filename wins" rule used to overwrite asset_path only, leaving
     a record that described one manufacturer while pointing at another's asset.
     """
-    import pytest
-
     tree = {
         "ROOT/Isaac/Robots/": ["AlphaCorp/", "BetaCorp/"],
         "ROOT/Isaac/Robots/AlphaCorp/": ["shared/"],
@@ -166,7 +184,7 @@ def test_colliding_model_names_keep_a_consistent_record():
     }
     mp = pytest.MonkeyPatch()
     try:
-        robots = _run_discovery(mp, tree)
+        robots = _run_discovery(mp, tree, cls_name)
     finally:
         mp.undo()
 
