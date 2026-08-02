@@ -860,6 +860,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
     # ── Sensors ────────────────────────────────────────────
 
+    def _apply_sensor_schema(self, prim_path: str) -> None:
+        """Make an already-present prim acceptable to the RTX sensor wrappers.
+
+        No-op when the prim does not exist yet — the wrapper will create it with
+        the right schema itself. See create_camera for why this is needed.
+        """
+        try:
+            prim = self.get_stage().GetPrimAtPath(prim_path)
+            if prim and prim.IsValid() and "OmniSensorAPI" not in prim.GetAppliedSchemas():
+                prim.ApplyAPI("OmniSensorAPI")
+        except Exception:
+            # Leave it to the sensor wrapper to raise a meaningful error.
+            pass
+
     def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
         # 6.0 RtxCamera takes a single `path: str` — the 5.x batched
         # (`prim_paths=[...], resolutions=[...]`) signature was removed.
@@ -868,6 +882,18 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # later capture_image calls read accumulated frames from the cache.
         from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
 
+        # RtxCamera adopts an existing prim rather than redefining it, and it
+        # does not apply OmniSensorAPI to one it did not create. Pointing
+        # create_camera at a path that already holds a plain UsdGeom.Camera —
+        # which imported USD scenes routinely ship — therefore failed with
+        # "Prim at <path> does not have the 'OmniSensorAPI' schema", while the
+        # same call on a fresh path succeeded. Reproduced on 6.0.1: fresh path
+        # OK, plain Camera at the path FAIL, existing RTX camera OK.
+        #
+        # Apply the schema first so an existing camera prim reaches RtxCamera in
+        # the same shape a newly created one would. A prim that does not exist
+        # yet needs nothing: RtxCamera creates it correctly.
+        self._apply_sensor_schema(prim_path)
         camera = RtxCamera(path=prim_path)
         # CameraSensor expects (height, width). Adapter callers historically
         # pass (width, height) — translate so the cached resolution is sane.

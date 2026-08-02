@@ -709,3 +709,64 @@ def test_v6_arming_failure_never_blocks_stepping(monkeypatch):
 
     adapter = _v6_for_arming(monkeypatch, _Broken())
     adapter._arm_reset_point()  # must not raise
+
+
+class _FakePrim:
+    def __init__(self, schemas=None, valid=True):
+        self._schemas = list(schemas or [])
+        self._valid = valid
+        self.applied = []
+
+    def IsValid(self):
+        return self._valid
+
+    def GetAppliedSchemas(self):
+        return list(self._schemas)
+
+    def ApplyAPI(self, name):
+        self.applied.append(name)
+        self._schemas.append(name)
+        return True
+
+
+def _v6_with_stage_prim(monkeypatch, prim):
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: types.SimpleNamespace(GetPrimAtPath=lambda _p: prim))
+    return adapter
+
+
+def test_v6_applies_the_sensor_schema_to_an_existing_camera_prim(monkeypatch):
+    """RtxCamera adopts an existing prim without applying OmniSensorAPI.
+
+    Pointing create_camera at a path that already holds a plain UsdGeom.Camera —
+    which imported USD scenes routinely ship — failed on 6.0.1 with "Prim at
+    <path> does not have the 'OmniSensorAPI' schema", while the same call on a
+    fresh path succeeded.
+    """
+    prim = _FakePrim(schemas=[])  # a plain Camera: no applied API schemas
+    adapter = _v6_with_stage_prim(monkeypatch, prim)
+
+    adapter._apply_sensor_schema("/World/Cam")
+
+    assert prim.applied == ["OmniSensorAPI"]
+
+
+def test_v6_does_not_reapply_the_sensor_schema(monkeypatch):
+    """A healthy RTX camera must be left untouched."""
+    prim = _FakePrim(schemas=["OmniSensorAPI", "OmniRtxCameraExposureAPI_1"])
+    adapter = _v6_with_stage_prim(monkeypatch, prim)
+
+    adapter._apply_sensor_schema("/World/Cam")
+
+    assert prim.applied == []
+
+
+def test_v6_sensor_schema_noop_when_the_prim_does_not_exist(monkeypatch):
+    """A path with no prim needs nothing — RtxCamera creates it correctly."""
+    prim = _FakePrim(schemas=[], valid=False)
+    adapter = _v6_with_stage_prim(monkeypatch, prim)
+
+    adapter._apply_sensor_schema("/World/Cam")
+
+    assert prim.applied == []
