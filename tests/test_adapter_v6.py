@@ -640,3 +640,72 @@ def test_v6_current_time_uses_the_physics_clock_not_the_timeline(monkeypatch):
     state = v6_mod.IsaacAdapterV6().get_simulation_state()
 
     assert state["current_time"] == 1.25, "current_time must track the physics clock"
+
+
+class _ArmTimeline:
+    """Timeline whose transitions are tick-driven, like kit's."""
+
+    def __init__(self, stopped=True):
+        self._stopped = stopped
+        self.calls = []
+
+    def is_stopped(self):
+        return self._stopped
+
+    def is_playing(self):
+        return False
+
+    def play(self):
+        self.calls.append("play")
+
+    def pause(self):
+        self.calls.append("pause")
+
+
+def _v6_for_arming(monkeypatch, timeline):
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    monkeypatch.setattr(adapter, "get_stage", lambda: object())
+    fake_timeline = types.ModuleType("omni.timeline")
+    fake_timeline.get_timeline_interface = lambda: timeline
+    fake_omni = types.ModuleType("omni")
+    fake_omni.timeline = fake_timeline
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline)
+    return adapter
+
+
+def test_v6_step_arms_a_reset_point_when_the_timeline_is_stopped(monkeypatch):
+    """Without a Play, PhysX has no restore point and stop_simulation does nothing.
+
+    play() and pause() are queued together so the timeline ends up paused without
+    a single frame running free — verified on 6.0.1, where a cube left at z=50.0
+    was still at exactly 50.0 afterwards.
+    """
+    timeline = _ArmTimeline(stopped=True)
+    adapter = _v6_for_arming(monkeypatch, timeline)
+
+    adapter._arm_reset_point()
+
+    assert timeline.calls == ["play", "pause"], "must queue play+pause to arm the restore point"
+
+
+def test_v6_does_not_disturb_a_timeline_that_is_already_running(monkeypatch):
+    """Re-arming mid-run would move the restore point and interrupt a real Play."""
+    timeline = _ArmTimeline(stopped=False)
+    adapter = _v6_for_arming(monkeypatch, timeline)
+
+    adapter._arm_reset_point()
+
+    assert timeline.calls == []
+
+
+def test_v6_arming_failure_never_blocks_stepping(monkeypatch):
+    """Losing the ability to reset must not cost the caller their step."""
+
+    class _Broken:
+        def is_stopped(self):
+            raise RuntimeError("timeline unavailable")
+
+    adapter = _v6_for_arming(monkeypatch, _Broken())
+    adapter._arm_reset_point()  # must not raise

@@ -757,6 +757,44 @@ class IsaacAdapterV6(IsaacAdapterBase):
         SimulationManager.setup_simulation(dt=1.0 / 60.0)
         SimulationManager.initialize_physics()
 
+    def _arm_reset_point(self) -> None:
+        """Give stop_simulation something to restore to, without running the sim.
+
+        PhysX records its restore point on a Play, and it records the state as
+        of the moment play() is called. V6 advances physics with
+        SimulationManager.step(), which never plays, so a run driven purely by
+        step_simulation had no restore point and stop_simulation silently did
+        nothing — a cube stepped down from z=2 stayed on the ground.
+
+        Play cannot simply be called and observed: timeline transitions are
+        tick-driven, and a handler may not pump kit's event loop (see step), so
+        is_playing() is still False on the next line. Queueing play() and
+        pause() together sidesteps that — by the time the next tick lands the
+        timeline is paused, and no frame ever runs free. Measured on 6.0.1: a
+        cube left at z=50.0 was still at exactly 50.0 afterwards, physics step
+        count unchanged, and a subsequent stop_simulation restored it to 50.0
+        from 48.73.
+
+        Deliberately NOT the agent's job: asking the caller to play then pause
+        costs a network round trip between the two, during which the sim runs
+        free — measured at ~1.4s of fall — which is exactly the imprecision
+        step_simulation exists to remove.
+
+        Only arms while the timeline is stopped, so it re-arms once per run and
+        never disturbs a genuine Play already in progress.
+        """
+        try:
+            import omni.timeline
+
+            timeline = omni.timeline.get_timeline_interface()
+            if timeline.is_stopped():
+                timeline.play()
+                timeline.pause()
+        except Exception:
+            # Best effort: failing to arm costs the ability to reset, but must
+            # never stop the caller from stepping.
+            pass
+
     def create_world(self, **kwargs) -> Any:
         """V6 exposes SimulationManager (a class-level singleton) where V5 returned World()."""
         from isaacsim.core.simulation_manager import SimulationManager
@@ -1064,6 +1102,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
         from isaacsim.core.simulation_manager import SimulationManager
 
         self._ensure_physics_world()
+        self._arm_reset_point()
         SimulationManager.step(steps=num_steps)
 
         result: Dict[str, Any] = {"stepped": num_steps}
