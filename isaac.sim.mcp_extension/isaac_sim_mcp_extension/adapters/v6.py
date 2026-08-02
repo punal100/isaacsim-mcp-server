@@ -1138,7 +1138,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
         else:
             timeline_state = "paused"
 
-        current_time = timeline.get_current_time()
+        # Report the physics clock, not the timeline clock. V6 advances physics
+        # with SimulationManager.step(), which never runs the timeline (handlers
+        # may not pump kit's event loop — see step), so timeline.get_current_time()
+        # stays at 0.0 for the entire step-only debug loop no matter how far the
+        # simulation has run. SimulationManager.get_simulation_time() tracks every
+        # physics step and resets to 0 on stop, which is the "time since this run
+        # began" that callers expect. Measured on 6.0.1: +1.0000s per step(60),
+        # and back to ~0 after stop.
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            current_time = float(SimulationManager.get_simulation_time())
+        except Exception:
+            current_time = timeline.get_current_time()
         stage = self.get_stage()
         physics_dt = 1.0 / 60.0
         for prim in stage.Traverse():

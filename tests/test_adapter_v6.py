@@ -585,3 +585,58 @@ def test_v6_stop_does_not_call_a_nonexistent_reset_api():
         body = f.read()
     call_sites = [ln for ln in body.splitlines() if "reset_simulation()" in ln and not ln.strip().startswith("#")]
     assert call_sites == [], f"v6 calls a non-existent API: {call_sites}"
+
+
+def test_v6_current_time_uses_the_physics_clock_not_the_timeline(monkeypatch):
+    """current_time must come from SimulationManager.get_simulation_time().
+
+    V6 advances physics with SimulationManager.step(), which never runs the
+    timeline, so timeline.get_current_time() reports 0.0 for the whole step-only
+    debug loop. The physics clock tracks each step and resets on stop.
+    """
+
+    class _Timeline:
+        def is_playing(self):
+            return False
+
+        def is_stopped(self):
+            return True
+
+        def get_current_time(self):
+            return 0.0  # timeline never advanced — the bug being fixed
+
+    class _Stage:
+        def Traverse(self):
+            return []
+
+    class _SM:
+        @classmethod
+        def get_active_physics_engine(cls):
+            return "physx"
+
+        @classmethod
+        def get_simulation_time(cls):
+            return 1.25
+
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", types.SimpleNamespace(SimulationManager=_SM))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.1"))
+
+    fake_timeline = types.ModuleType("omni.timeline")
+    fake_timeline.get_timeline_interface = lambda: _Timeline()
+    fake_usd = types.ModuleType("omni.usd")
+    fake_usd.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
+    fake_omni = types.ModuleType("omni")
+    fake_omni.timeline = fake_timeline
+    fake_omni.usd = fake_usd
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline)
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd)
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    state = v6_mod.IsaacAdapterV6().get_simulation_state()
+
+    assert state["current_time"] == 1.25, "current_time must track the physics clock"
