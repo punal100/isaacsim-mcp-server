@@ -526,83 +526,43 @@ def _install_fake_omni(monkeypatch, timeline, app):
     monkeypatch.setitem(sys.modules, "omni.kit.app", fake_app_mod)
 
 
-def test_v6_step_runs_the_timeline_like_v5(monkeypatch):
-    """V6.step must drive the timeline, not SimulationManager.step(steps=N).
+def test_v6_step_must_not_pump_the_kit_event_loop(monkeypatch):
+    """step must not call omni.kit.app.update().
 
-    Advancing physics without ever playing means PhysX never captures a spawn
-    state, so stop_simulation cannot reset (measured on 6.0.1: a cube stepped
-    from z=2 to the ground stayed there), and the timeline clock never moves so
-    current_time reports 0.0 forever.
+    Handlers run as an asyncio Task on kit's main loop (see
+    SocketServer._dispatch_command). Pumping the loop from inside that Task
+    raises "Cannot enter into task <other> while another task <this handler> is
+    being executed" for every other pending kit task — property window,
+    viewport, USD cache listener, throttling, HTTP server — and invalidates the
+    physics tensor view, after which get_velocities fails with "Simulation view
+    object is invalidated". Verified on 6.0.1.
+
+    The errors never surface to the caller: asyncio logs them and step returns
+    a plausible-looking result, so only the kit console reveals the damage.
     """
-    events = []
+    import ast
+    import os
 
-    class _Timeline:
-        def is_playing(self):
-            return False
-
-        def play(self):
-            events.append("play")
-
-        def pause(self):
-            events.append("pause")
-
-    class _App:
-        def update(self):
-            events.append("update")
-
-    calls = []
-    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
-    monkeypatch.setattr(adapter, "get_stage", lambda: object())
-
-    _install_fake_omni(monkeypatch, _Timeline(), _App())
-
-    result = adapter.step(num_steps=4)
-
-    assert result["stepped"] == 4
-    assert events == ["play", "update", "update", "update", "update", "pause"]
-    # SimulationManager.step must not be used for advancing.
-    assert "step" not in calls
-
-
-def test_v6_step_suspends_action_graphs(monkeypatch):
-    """Playing the timeline ticks OnPlaybackTick graphs, which would re-command
-    the robot and discard the caller's set_joint_positions (V5 bug e3e555c).
-    V6 did not need this while it bypassed the timeline; now it does."""
-    import contextlib
-
-    entered = []
-
-    class _Timeline:
-        def is_playing(self):
-            return False
-
-        def play(self):
-            pass
-
-        def pause(self):
-            pass
-
-    class _App:
-        def update(self):
-            pass
-
-    calls = []
-    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
-    monkeypatch.setattr(adapter, "get_stage", lambda: object())
-
-    @contextlib.contextmanager
-    def _fake_suspend():
-        entered.append("suspended")
-        yield ["/World/Graph"]
-
-    monkeypatch.setattr(adapter, "_graphs_suspended", _fake_suspend)
-
-    _install_fake_omni(monkeypatch, _Timeline(), _App())
-
-    result = adapter.step(num_steps=1)
-
-    assert entered == ["suspended"], "step must suspend Action Graphs while the timeline runs"
-    assert result["graphs_suspended"] == ["/World/Graph"]
+    src_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "isaac.sim.mcp_extension",
+        "isaac_sim_mcp_extension",
+        "adapters",
+        "v6.py",
+    )
+    with open(src_path) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    step_src = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "step":
+            step_src = ast.get_source_segment(text, node)
+            break
+    assert step_src is not None, "v6.step not found"
+    code = "\n".join(line.split("#", 1)[0] for line in step_src.splitlines())
+    assert "get_app().update()" not in code, "v6.step must not pump the kit event loop"
+    assert "SimulationManager.step" in code
 
 
 def test_v6_stop_does_not_call_a_nonexistent_reset_api():

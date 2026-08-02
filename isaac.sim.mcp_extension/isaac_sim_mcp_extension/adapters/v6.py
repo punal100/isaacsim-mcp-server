@@ -1045,50 +1045,28 @@ class IsaacAdapterV6(IsaacAdapterBase):
         observe_prims: Optional[List[str]] = None,
         observe_joints: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        # Run the timeline for exactly num_steps frames, then freeze again —
-        # identical to V5, so both adapters give the caller the same contract.
+        # SimulationManager.step pumps only the physics pipeline (no asyncio
+        # event-loop reentry), which avoids the "Cannot enter into task" errors
+        # that omni.kit.app.update() triggers when called from inside the MCP
+        # dispatch coroutine on Kit 107 (Isaac Sim 6.0). SocketServer
+        # ._dispatch_command documents this as a hard constraint on handlers.
         #
-        # This deliberately does NOT use SimulationManager.step(steps=N), which
-        # advances physics without ever starting the timeline. That looks
-        # equivalent (it does advance physics by exactly N frames) but has two
-        # consequences measured on 6.0.1:
-        #   * PhysX captures its spawn state on Play, so a run that never played
-        #     has nothing to restore and stop_simulation silently does nothing —
-        #     a cube stepped from z=2 down to the ground stayed there.
-        #   * The timeline clock never moves, so get_simulation_state reports
-        #     current_time = 0.0 forever no matter how far the sim has run.
-        #
-        # The comment this replaced justified SimulationManager.step by claiming
-        # omni.kit.app.update() raises "Cannot enter into task" when called from
-        # inside the MCP dispatch coroutine on Kit 107. That does not reproduce
-        # on 6.0.1: update() from inside a dispatched execute_script succeeds,
-        # and this sequence lands the probe cube at z=0.73287 against a
-        # semi-implicit-Euler prediction of 0.73287 for 30 frames.
-        import omni.kit.app
-        import omni.timeline
+        # Do NOT "fix" stop_simulation's inability to reset a step-only run by
+        # driving the timeline with app.update() here, the way V5 does. It looks
+        # like it works — the physics is exact and stop then restores the spawn
+        # pose — but it floods the log with
+        #     RuntimeError: Cannot enter into task <...> while another task
+        #     <SocketServer._dispatch_command...execute_wrapper> is being executed
+        # killing unrelated kit tasks mid-flight (property window, viewport,
+        # USD cache listener, throttling, HTTP server) and invalidating the
+        # physics tensor view, after which get_velocities/get_transforms fail
+        # with "Simulation view object is invalidated". Verified on 6.0.1.
+        from isaacsim.core.simulation_manager import SimulationManager
 
         self._ensure_physics_world()
-        timeline = omni.timeline.get_timeline_interface()
-        resume_paused = not timeline.is_playing()
-        # Running the timeline also evaluates Action Graphs, so a ScriptNode
-        # controller would re-command the robot on every stepped frame and
-        # silently discard the caller's set_joint_positions. Suspend graphs for
-        # the duration; play is the mode for driving them.
-        with self._graphs_suspended() as suspended:
-            if resume_paused:
-                timeline.play()
-            try:
-                for _ in range(num_steps):
-                    omni.kit.app.get_app().update()
-            finally:
-                if resume_paused:
-                    # Pause (not stop): stop would reset everything to the spawn
-                    # pose and discard exactly the physics result being measured.
-                    timeline.pause()
+        SimulationManager.step(steps=num_steps)
 
         result: Dict[str, Any] = {"stepped": num_steps}
-        if suspended:
-            result["graphs_suspended"] = [str(p) for p in suspended]
 
         if observe_prims:
             from pxr import UsdPhysics
