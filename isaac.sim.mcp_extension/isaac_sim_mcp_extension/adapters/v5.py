@@ -73,6 +73,17 @@ def _recompile_scriptnodes_for_file(abs_path: str) -> list:
 class IsaacAdapterV5(IsaacAdapterBase):
     """Adapter for Isaac Sim 5.1.0 (isaacsim.* namespace)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Long-lived Camera wrappers keyed by prim_path, and the subset that has
+        # been initialized. A Camera only fills its buffer on render ticks after
+        # initialize(), so a wrapper rebuilt per call can never return a frame —
+        # and initialize() must run exactly once per camera, since each call
+        # creates a render product, attaches annotators and registers three
+        # event subscriptions. See capture_camera_image.
+        self._camera_sensors: Dict[str, Any] = {}
+        self._initialized_cameras: set = set()
+
     # ── Scene ──────────────────────────────────────────────
 
     def get_stage(self) -> Usd.Stage:
@@ -811,13 +822,56 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
         from isaacsim.sensors.camera import Camera
 
-        return Camera(prim_path=prim_path, resolution=resolution, **kwargs)
+        camera = Camera(prim_path=prim_path, resolution=resolution, **kwargs)
+        # Keep the wrapper so capture_camera_image reads this camera — created
+        # with the caller's resolution — instead of building a throwaway one.
+        self._camera_sensors[prim_path] = camera
+        self._initialized_cameras.discard(prim_path)
+        return camera
 
     def capture_camera_image(self, prim_path: str) -> np.ndarray:
+        """Return the latest RGBA frame, or an empty array if none has rendered.
+
+        This used to build `Camera(prim_path=prim_path)` on every call and read
+        get_rgba() immediately, which could never return an image:
+
+          * A Camera only fills its buffer on render ticks *after* initialize(),
+            and this never called it.
+          * A wrapper created inside the call has had no tick to render into, so
+            its first read is always empty — and the next call discarded it and
+            started over.
+          * Rebuilding without the resolution also dropped the one requested at
+            create_camera, so captures came back at the 128x128 Camera default.
+
+        Verified on Isaac Sim 5.1.0: capture returned an empty array on every
+        call with the timeline stopped *and* playing, while a wrapper kept alive
+        and initialized returned a real (128, 128, 4) frame on the next call.
+
+        initialize() runs at most once per camera. Calling it per capture — the
+        first version of this fix — left kit alive but unresponsive: the
+        integration suite went from 7s to not finishing in 240s. Each call
+        creates a render product, attaches annotators and registers three event
+        subscriptions, so repeating it per request accumulates work the renderer
+        then carries every frame.
+        """
         from isaacsim.sensors.camera import Camera
 
-        cam = Camera(prim_path=prim_path)
-        return cam.get_rgba()
+        camera = self._camera_sensors.get(prim_path)
+        if camera is None:
+            camera = Camera(prim_path=prim_path)
+            self._camera_sensors[prim_path] = camera
+        if prim_path not in self._initialized_cameras:
+            try:
+                camera.initialize()
+            except Exception:
+                # A camera whose render product is not ready yet reads as
+                # "no frame", not as a failed capture.
+                pass
+            self._initialized_cameras.add(prim_path)
+        data = camera.get_rgba()
+        if data is None:
+            return np.zeros((0,), dtype=np.uint8)
+        return data
 
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
         from isaacsim.sensors.rtx import LidarRtx

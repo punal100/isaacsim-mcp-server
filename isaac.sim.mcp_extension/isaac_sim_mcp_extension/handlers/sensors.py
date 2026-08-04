@@ -68,13 +68,22 @@ def capture_image(
         # (/omni/replicator/captureOnPlay defaults to True), and every capture
         # returned an empty array while reporting success.
         if image_data is None or getattr(image_data, "size", 0) == 0:
+            # Only say a render was requested if this adapter can actually
+            # request one. V6 schedules a Replicator frame; V5 has no such path,
+            # and telling a 5.1 caller to "call again to collect it" would send
+            # them round a loop that never terminates.
+            requested = getattr(adapter, "_render_request", None) is not None
+            remedy = (
+                "A render has been requested — call capture_image again to collect it."
+                if requested
+                else "Play the simulation, or capture again once a frame has rendered."
+            )
             return {
                 "status": "error",
                 "message": (
                     f"No frame available from {prim_path} yet. RTX sensor data is produced by "
                     "Replicator, which by default only captures while the timeline is playing "
-                    "(/omni/replicator/captureOnPlay). A render has been requested — call "
-                    "capture_image again to collect it."
+                    f"(/omni/replicator/captureOnPlay). {remedy}"
                 ),
             }
         if output_path:
