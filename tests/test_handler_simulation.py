@@ -122,3 +122,51 @@ def test_graph_suspension_restores_state():
     assert "finally:" in src, "restoration must survive an exception"
     assert "set_disabled(False)" in src
     assert "is_disabled()" in src, "already-disabled graphs must not be re-enabled"
+
+
+# ── set_physics_params ───────────────────────────────────────────────────────
+
+
+class _GravityAdapter:
+    def __init__(self):
+        self.calls = []
+
+    def create_physics_scene(self, gravity=None, scene_name="PhysicsScene"):
+        self.calls.append(gravity)
+        return "/World/" + scene_name
+
+
+def test_set_physics_forwards_gravity_to_the_adapter():
+    """Gravity used to be accepted and dropped: asking for Mars [0,0,-3.72] on
+    6.0.1 still measured -4.7415 m/s after 30 frames, i.e. Earth."""
+    from isaac_sim_mcp_extension.handlers.simulation import set_physics
+
+    adapter = _GravityAdapter()
+    result = set_physics(adapter, gravity=[0, 0, -3.72])
+
+    assert result["status"] == "success"
+    assert adapter.calls == [[0, 0, -3.72]]
+
+
+def test_set_physics_reports_parameters_it_cannot_apply():
+    """time_step and gpu_enabled are in the signature but unimplemented.
+
+    They were swallowed under a blanket "Physics parameters updated", so a
+    caller could set a time step, be told it worked, and silently run the whole
+    session at the default rate.
+    """
+    from isaac_sim_mcp_extension.handlers.simulation import set_physics
+
+    result = set_physics(_GravityAdapter(), time_step=1.0 / 240.0, gpu_enabled=True)
+
+    assert result["status"] == "error"
+    assert "time_step" in result["message"]
+    assert "gpu_enabled" in result["message"]
+
+
+def test_set_physics_rejects_an_empty_request():
+    from isaac_sim_mcp_extension.handlers.simulation import set_physics
+
+    result = set_physics(_GravityAdapter())
+
+    assert result["status"] == "error"

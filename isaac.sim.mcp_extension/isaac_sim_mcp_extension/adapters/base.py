@@ -310,6 +310,34 @@ class IsaacAdapterBase(ABC):
                 except Exception:
                     pass
 
+    def _apply_gravity(self, scene_path: str, gravity: Sequence[float]) -> bool:
+        """Write a gravity vector onto a PhysicsScene. Returns True if applied.
+
+        USD stores gravity as a direction plus a magnitude, not as a vector, so a
+        caller-supplied [x, y, z] has to be decomposed. Both adapters used to
+        accept `gravity` and drop it: create_physics_scene only ran CreatePrim,
+        leaving the scene at its defaults (direction (0,0,0), magnitude -inf,
+        meaning "engine default"). set_physics_params reported "Physics
+        parameters updated" while changing nothing — asking for Mars gravity
+        [0, 0, -3.72] on 6.0.1 still produced a measured -4.7415 m/s after 30
+        frames, i.e. Earth.
+
+        A zero-length vector has no direction to derive, so it is treated as
+        "straight down" with zero magnitude rather than producing NaNs.
+        """
+        from pxr import Gf, UsdPhysics
+
+        prim = self.get_stage().GetPrimAtPath(scene_path)
+        if not prim or not prim.IsValid():
+            return False
+        vector = Gf.Vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
+        magnitude = float(vector.GetLength())
+        direction = Gf.Vec3f(vector / magnitude) if magnitude > 0 else Gf.Vec3f(0.0, 0.0, -1.0)
+        scene = UsdPhysics.Scene(prim)
+        scene.CreateGravityDirectionAttr().Set(direction)
+        scene.CreateGravityMagnitudeAttr().Set(magnitude)
+        return True
+
     def _stage_has_physics_scene(self) -> bool:
         """True when the stage carries at least one PhysicsScene prim."""
         try:

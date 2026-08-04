@@ -814,6 +814,10 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
         scene_path = f"/World/{scene_name}"
         omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+        if gravity is not None:
+            # Without this the argument was accepted and discarded — see
+            # _apply_gravity.
+            self._apply_gravity(scene_path, gravity)
         return scene_path
 
     def get_physics_state(self, prim_path: str) -> Dict[str, Any]:

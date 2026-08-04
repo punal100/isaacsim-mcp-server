@@ -110,11 +110,34 @@ def set_physics(
     gpu_enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
     try:
-        # Physics params are set via the PhysicsContext on the World
-        # For now, gravity is the most common parameter
+        applied = []
+        unsupported = []
         if gravity is not None:
             adapter.create_physics_scene(gravity=gravity)
-        return {"status": "success", "message": "Physics parameters updated"}
+            applied.append("gravity")
+        # time_step and gpu_enabled are accepted by the signature but no adapter
+        # implements them. They used to be swallowed silently under a blanket
+        # "Physics parameters updated", so a caller could set a time step, be
+        # told it worked, and run the whole session at the default rate. Say so
+        # instead of pretending.
+        if time_step is not None:
+            unsupported.append("time_step")
+        if gpu_enabled is not None:
+            unsupported.append("gpu_enabled")
+
+        if not applied and not unsupported:
+            return {"status": "error", "message": "No physics parameters supplied"}
+        if unsupported:
+            return {
+                "status": "error",
+                "message": (
+                    f"Applied: {applied or 'nothing'}. Not supported by this adapter and therefore "
+                    f"ignored: {unsupported}. Set them directly with execute_script if you need them."
+                ),
+                "applied": applied,
+                "unsupported": unsupported,
+            }
+        return {"status": "success", "message": f"Physics parameters updated: {applied}", "applied": applied}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
