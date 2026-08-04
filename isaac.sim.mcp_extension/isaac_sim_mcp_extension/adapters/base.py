@@ -310,6 +310,35 @@ class IsaacAdapterBase(ABC):
                 except Exception:
                     pass
 
+    def _find_physics_scene(self, preferred_path: Optional[str] = None) -> Optional[str]:
+        """Path of a PhysicsScene already on the stage, preferring `preferred_path`.
+
+        Isaac Sim 6.0 ships a `/PhysicsScene` on a new stage. Adding a second one
+        at `/World/PhysicsScene` — which create_physics_scene did unconditionally
+        — leaves two scenes, and the omni.physics.tensors backend then refuses
+        state reads: get_velocities fails with "Failed to get rigid body
+        velocities from backend", which get_physics_state and step's observations
+        swallow into a plausible-looking [0, 0, 0].
+
+        Verified on 6.0.1: a body in free fall reported zero velocity with both
+        scenes present, and -1.9840 m/s immediately after the duplicate was
+        removed, with nothing else changed.
+        """
+        try:
+            stage = self.get_stage()
+            if stage is None:
+                return None
+            if preferred_path:
+                prim = stage.GetPrimAtPath(preferred_path)
+                if prim and prim.IsValid() and prim.GetTypeName() == "PhysicsScene":
+                    return preferred_path
+            for prim in stage.Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    return prim.GetPath().pathString
+        except Exception:
+            pass
+        return None
+
     def _apply_gravity(self, scene_path: str, gravity: Sequence[float]) -> bool:
         """Write a gravity vector onto a PhysicsScene. Returns True if applied.
 

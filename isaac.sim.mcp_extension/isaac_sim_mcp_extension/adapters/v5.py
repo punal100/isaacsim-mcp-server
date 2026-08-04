@@ -730,7 +730,13 @@ class IsaacAdapterV5(IsaacAdapterBase):
         import omni.kit.commands
 
         scene_path = f"/World/{scene_name}"
-        omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+        # Reuse a scene that already exists rather than adding a second one:
+        # two PhysicsScenes break physics state reads. See _find_physics_scene.
+        existing = self._find_physics_scene(preferred_path=scene_path)
+        if existing is not None:
+            scene_path = existing
+        else:
+            omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
         if gravity is not None:
             # Without this the argument was accepted and discarded — see
             # _apply_gravity.

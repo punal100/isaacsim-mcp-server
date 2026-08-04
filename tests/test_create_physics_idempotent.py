@@ -84,3 +84,75 @@ def test_second_call_does_not_recreate_ground_plane():
     result = scene_handlers.create_physics(a)
     assert result["status"] == "success"
     a.create_prim.assert_not_called()
+
+
+# ── duplicate PhysicsScene ───────────────────────────────────────────────────
+
+
+class _ScenePrim:
+    def __init__(self, path, type_name):
+        self._path = path
+        self._type = type_name
+
+    def IsValid(self):
+        return True
+
+    def GetTypeName(self):
+        return self._type
+
+    def GetPath(self):
+        return type("P", (), {"pathString": self._path})()
+
+
+class _SceneStage:
+    def __init__(self, prims):
+        self._prims = {p: _ScenePrim(p, t) for p, t in prims.items()}
+
+    def Traverse(self):
+        return list(self._prims.values())
+
+    def GetPrimAtPath(self, path):
+        found = self._prims.get(path)
+        if found is not None:
+            return found
+        missing = _ScenePrim(path, "")
+        missing.IsValid = lambda: False
+        return missing
+
+
+def _adapter_with_stage(stage):
+    """A minimal concrete adapter exposing only what _find_physics_scene needs."""
+    from isaac_sim_mcp_extension.adapters.base import IsaacAdapterBase
+
+    class _A(IsaacAdapterBase):
+        def get_stage(self):
+            return stage
+
+    _A.__abstractmethods__ = frozenset()
+    return _A()
+
+
+def test_finds_the_stage_default_physics_scene():
+    """Isaac Sim 6.0 ships /PhysicsScene on a new stage.
+
+    Creating a second scene at /World/PhysicsScene makes the tensor backend
+    refuse state reads — get_velocities fails and the callers swallow it into
+    [0, 0, 0]. Verified on 6.0.1: a falling body reported zero velocity with two
+    scenes present and -1.9840 m/s once the duplicate was removed.
+    """
+    adapter = _adapter_with_stage(_SceneStage({"/PhysicsScene": "PhysicsScene"}))
+
+    assert adapter._find_physics_scene(preferred_path="/World/PhysicsScene") == "/PhysicsScene"
+
+
+def test_prefers_the_requested_path_when_it_already_holds_a_scene():
+    stage = _SceneStage({"/PhysicsScene": "PhysicsScene", "/World/PhysicsScene": "PhysicsScene"})
+    adapter = _adapter_with_stage(stage)
+
+    assert adapter._find_physics_scene(preferred_path="/World/PhysicsScene") == "/World/PhysicsScene"
+
+
+def test_reports_no_scene_on_an_empty_stage():
+    adapter = _adapter_with_stage(_SceneStage({"/World": "Xform"}))
+
+    assert adapter._find_physics_scene(preferred_path="/World/PhysicsScene") is None
