@@ -66,6 +66,7 @@ def test_capture_reports_an_error_when_no_frame_is_available():
     assert "/World/Cam" in result["message"]
     # The message has to say what to do about it, not just that it failed.
     assert "playing" in result["message"]
+    assert "again" in result["message"]
 
 
 def test_capture_reports_an_error_when_the_adapter_returns_none():

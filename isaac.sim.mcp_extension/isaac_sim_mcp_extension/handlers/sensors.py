@@ -71,10 +71,10 @@ def capture_image(
             return {
                 "status": "error",
                 "message": (
-                    f"No frame available from {prim_path}. RTX sensor data is produced by "
+                    f"No frame available from {prim_path} yet. RTX sensor data is produced by "
                     "Replicator, which by default only captures while the timeline is playing "
-                    "(/omni/replicator/captureOnPlay). Play the simulation, or capture again "
-                    "once a frame has been rendered."
+                    "(/omni/replicator/captureOnPlay). A render has been requested — call "
+                    "capture_image again to collect it."
                 ),
             }
         if output_path:

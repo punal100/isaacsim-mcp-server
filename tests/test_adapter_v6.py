@@ -770,3 +770,81 @@ def test_v6_sensor_schema_noop_when_the_prim_does_not_exist(monkeypatch):
     adapter._apply_sensor_schema("/World/Cam")
 
     assert prim.applied == []
+
+
+def _install_fake_replicator(monkeypatch, scheduled, pending_done):
+    """Publish omni.replicator.core and capture what gets scheduled.
+
+    `import omni.replicator.core` walks the parent packages, so each level has to
+    exist as an attribute as well as in sys.modules. asyncio.ensure_future is
+    patched on the real module rather than replaced wholesale.
+    """
+    import asyncio as real_asyncio
+
+    async def _step_async(**kwargs):
+        return None
+
+    fake_core = types.ModuleType("omni.replicator.core")
+    fake_core.orchestrator = types.SimpleNamespace(step_async=_step_async)
+    fake_replicator = types.ModuleType("omni.replicator")
+    fake_replicator.core = fake_core
+    fake_omni = types.ModuleType("omni")
+    fake_omni.replicator = fake_replicator
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.replicator", fake_replicator)
+    monkeypatch.setitem(sys.modules, "omni.replicator.core", fake_core)
+
+    class _Task:
+        def done(self):
+            return pending_done
+
+    def _ensure_future(coro, *a, **kw):
+        scheduled.append(coro)
+        coro.close()
+        return _Task()
+
+    monkeypatch.setattr(real_asyncio, "ensure_future", _ensure_future)
+
+
+def test_v6_requests_a_render_frame_without_starting_the_timeline(monkeypatch):
+    """An empty sensor must trigger a Replicator frame, scheduled not awaited.
+
+    Measured on 6.0.1: orchestrator.run() starts the timeline (playing=True),
+    which destroys frame-exact stepping, and the synchronous orchestrator.step()
+    is refused from inside kit. step_async scheduled onto kit's loop captures one
+    frame with the timeline left stopped.
+    """
+    scheduled = []
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    _install_fake_replicator(monkeypatch, scheduled, pending_done=False)
+
+    assert adapter._request_render_frame() is True
+    assert len(scheduled) == 1, "must schedule exactly one render request"
+
+
+def test_v6_does_not_queue_a_second_render_request_while_one_is_pending(monkeypatch):
+    """Repeated captures on a blank camera must not pile up orchestrator tasks."""
+    scheduled = []
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    _install_fake_replicator(monkeypatch, scheduled, pending_done=False)
+
+    adapter._request_render_frame()
+    adapter._request_render_frame()
+    adapter._request_render_frame()
+
+    assert len(scheduled) == 1
+
+
+def test_v6_requests_a_new_frame_once_the_previous_request_finished(monkeypatch):
+    """A completed request must not block later captures from asking again."""
+    scheduled = []
+    calls = []
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    _install_fake_replicator(monkeypatch, scheduled, pending_done=True)
+
+    adapter._request_render_frame()
+    adapter._request_render_frame()
+
+    assert len(scheduled) == 2

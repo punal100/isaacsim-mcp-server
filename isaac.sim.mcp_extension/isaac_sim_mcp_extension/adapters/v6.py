@@ -94,6 +94,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # update tick populate the annotator between MCP calls.
         self._camera_sensors: Dict[str, Any] = {}
         self._lidar_sensors: Dict[str, Any] = {}
+        # Pending Replicator render request, so repeated captures on an empty
+        # sensor do not queue one task per call. See _request_render_frame.
+        self._render_request = None
         self._timeline_stop_subscription = None
         try:
             import carb.eventdispatcher
@@ -860,6 +863,48 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
     # ── Sensors ────────────────────────────────────────────
 
+    def _request_render_frame(self) -> bool:
+        """Ask Replicator to render one frame, without starting the timeline.
+
+        RTX sensor data comes from Replicator's orchestrator, which by default
+        only captures while the timeline plays (/omni/replicator/captureOnPlay).
+        The documented debug loop is step-only and never plays, so on 6.0.1 the
+        orchestrator sat at STOPPED and every camera returned an empty frame
+        forever.
+
+        Two obvious remedies are wrong here:
+
+          * orchestrator.run() starts the timeline. Measured on 6.0.1: from a
+            stopped timeline it left playing=True, which turns the sim loose and
+            destroys the frame-exact stepping step_simulation exists to provide.
+          * The synchronous orchestrator.step() is refused outright by
+            Replicator from inside kit — "Synchronous call to `step` can only be
+            performed in a standalone workflow ... Please use the async function
+            `step_async`" — which matches the rule that handlers must not pump
+            kit's event loop.
+
+        So schedule step_async and return immediately. It runs on kit's loop
+        once this handler is done, captures a single frame with pause_timeline
+        set, and leaves the timeline exactly as it found it. Measured: timeline
+        stayed stopped, orchestrator reached STEPPED, the next capture returned
+        a real image, and the kit log recorded no reentry errors.
+
+        The frame is therefore ready on the *next* call, not this one — the
+        caller is told to retry rather than being handed a blank image.
+        """
+        try:
+            import asyncio
+
+            import omni.replicator.core as rep
+
+            pending = self._render_request
+            if pending is not None and not pending.done():
+                return True
+            self._render_request = asyncio.ensure_future(rep.orchestrator.step_async(pause_timeline=True))
+            return True
+        except Exception:
+            return False
+
     def _apply_sensor_schema(self, prim_path: str) -> None:
         """Make an already-present prim acceptable to the RTX sensor wrappers.
 
@@ -917,6 +962,10 @@ class IsaacAdapterV6(IsaacAdapterBase):
             self._camera_sensors[prim_path] = sensor
         data, _info = sensor.get_data("rgb")
         if data is None:
+            # Nothing rendered yet. Ask Replicator for a frame so the next call
+            # succeeds, instead of leaving cameras permanently blank in the
+            # step-only debug loop.
+            self._request_render_frame()
             return np.zeros((0,), dtype=np.uint8)
         return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
 
