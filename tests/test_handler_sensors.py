@@ -246,3 +246,51 @@ def test_lidar_does_not_promise_that_retrying_will_work():
         message = get_point_cloud(adapter, prim_path="/World/Lidar")["message"]
         assert "render has been requested" not in message
         assert "play_simulation" in message
+
+
+def test_v6_lidar_decodes_the_generic_model_output_buffer(monkeypatch):
+    """The annotator hands back a packed GMO struct, not points.
+
+    Measured on 6.0.1: dtype uint8, 19,353,864 bytes, first four bytes
+    79 77 71 78 ("OMGN"). Returning it raw made the handler report the byte
+    length as a point count. Isaac ships parse_generic_model_output_data to
+    decode it into x/y/z arrays plus numElements.
+    """
+    import sys
+    import types
+
+    class _Buffer:
+        size = 24
+
+        def numpy(self):
+            class _A:
+                size = 24
+
+            return _A()
+
+    class _GMO:
+        numElements = 3
+        x = [1.0, 2.0, 3.0]
+        y = [4.0, 5.0, 6.0]
+        z = [7.0, 8.0, 9.0]
+
+    class _Sensor:
+        def get_data(self, name):
+            return _Buffer(), {}
+
+    rtx = types.ModuleType("isaacsim.sensors.experimental.rtx")
+    rtx.LidarSensor = lambda **kw: _Sensor()
+    rtx.parse_generic_model_output_data = lambda data: _GMO()
+    monkeypatch.setitem(sys.modules, "isaacsim.sensors.experimental.rtx", rtx)
+
+    calls = []
+    from tests.test_adapter_v6 import _v6_with_stub_simulation_manager
+
+    adapter = _v6_with_stub_simulation_manager(monkeypatch, calls)
+    adapter._lidar_sensors["/World/Lidar"] = _Sensor()
+
+    pc = adapter.get_lidar_point_cloud("/World/Lidar")
+
+    assert pc.shape == (3, 3), pc
+    assert pc[0].tolist() == [1.0, 4.0, 7.0]
+    assert pc[2].tolist() == [3.0, 6.0, 9.0]

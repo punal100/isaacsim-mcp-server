@@ -122,6 +122,39 @@ def _install_isaac_stubs() -> None:
         # not raise AttributeError.
         np_stub.float32 = "float32"  # type: ignore[attr-defined]
         np_stub.int32 = "int32"  # type: ignore[attr-defined]
+        np_stub.uint8 = "uint8"  # type: ignore[attr-defined]
+
+        # v6.get_lidar_point_cloud stacks the decoded x/y/z arrays into (N, 3).
+        # Enough of a stand-in to exercise that path: a list of rows with
+        # .shape, .tolist() and indexing, plus an .astype that is a no-op.
+        class _Rows(list):
+            @property
+            def shape(self):
+                return (len(self), len(self[0]) if self else 0)
+
+            def astype(self, _dtype):
+                return self
+
+            def tolist(self):
+                return [list(row) for row in self]
+
+        class _Row(list):
+            def tolist(self):
+                return list(self)
+
+        def _stack(arrays, axis=0):
+            if axis in (-1, 1):
+                return _Rows(_Row(vals) for vals in zip(*arrays))
+            return _Rows(_Row(a) for a in arrays)
+
+        np_stub.stack = _stack  # type: ignore[attr-defined]
+
+        def _zeros(shape, dtype=None):
+            rows = shape[0] if isinstance(shape, tuple) else shape
+            cols = shape[1] if isinstance(shape, tuple) and len(shape) > 1 else 0
+            return _Rows(_Row([0] * cols) for _ in range(rows))
+
+        np_stub.zeros = _zeros  # type: ignore[attr-defined]
         sys.modules["numpy"] = np_stub
 
     # ── pxr ──────────────────────────────────────────────────────────────────

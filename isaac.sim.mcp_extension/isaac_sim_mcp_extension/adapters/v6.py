@@ -1007,7 +1007,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # 6.0 LidarSensor uses the unified "generic-model-output" annotator;
         # the 5.x `RtxSensorCpu+IsaacComputeRTXLidarPointCloud` chain is gone.
         # See `capture_camera_image` for the caching rationale.
-        from isaacsim.sensors.experimental.rtx import LidarSensor
+        from isaacsim.sensors.experimental.rtx import LidarSensor, parse_generic_model_output_data
 
         sensor = self._lidar_sensors.get(prim_path)
         if sensor is None:
@@ -1028,7 +1028,24 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # caller retry forever.
         if array is None or getattr(array, "size", 0) == 0:
             return np.zeros((0, 3), dtype=np.float32)
-        return array
+
+        # The "generic-model-output" annotator returns a packed GenericModelOutput
+        # struct, not points: a uint8 buffer whose first four bytes are the magic
+        # 0x4E474D4F ("OMGN"). Returning it raw meant callers received bytes and
+        # the handler reported len(buffer) as a point count — 19,353,864 for one
+        # frame on 6.0.1, which is the byte length.
+        #
+        # 5.x had a point-cloud annotator that needed no decoding; 6.0 replaced it
+        # with this unified buffer plus parse_generic_model_output_data, and the
+        # port kept the new annotator without adopting the decode.
+        gmo = parse_generic_model_output_data(data)
+        count = int(getattr(gmo, "numElements", 0) or 0)
+        if count <= 0:
+            return np.zeros((0, 3), dtype=np.float32)
+        x = np.asarray(gmo.x)[:count]
+        y = np.asarray(gmo.y)[:count]
+        z = np.asarray(gmo.z)[:count]
+        return np.stack([x, y, z], axis=-1).astype(np.float32)
 
     # ── Materials ──────────────────────────────────────────
 
