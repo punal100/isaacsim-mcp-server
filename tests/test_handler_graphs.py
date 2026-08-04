@@ -80,3 +80,38 @@ def test_reload_script_scans_scriptnodes_by_scriptpath():
             src = f.read()
         assert "inputs:scriptPath" in src  # reload matches nodes by their file
         assert "force_recompile_scriptnode" in src  # and recompiles them
+
+
+def test_action_graph_evaluator_defaults_to_execution():
+    """A push graph evaluates every application update, ignoring the timeline.
+
+    create_action_graph wires OnPlaybackTick -> ScriptNode, so a push evaluator
+    bypasses exactly the gating it just built. Measured on 6.0.1 with the
+    timeline stopped: the push graph's ScriptNode ran past 5000 ticks while an
+    otherwise identical execution graph stayed frozen and only advanced during
+    play. A controller left running re-commands the robot and silently discards
+    the caller's set_joint_positions during the step-only debug loop.
+    """
+    import ast
+    import os
+
+    for rel in (
+        os.path.join("isaac.sim.mcp_extension", "isaac_sim_mcp_extension", "handlers", "graphs.py"),
+        os.path.join("isaac_mcp", "tools", "graphs.py"),
+    ):
+        path = os.path.join(os.path.dirname(__file__), "..", rel)
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "create_action_graph":
+                defaults = {}
+                args = node.args.args[-len(node.args.defaults) :] if node.args.defaults else []
+                for arg, default in zip(args, node.args.defaults):
+                    if isinstance(default, ast.Constant):
+                        defaults[arg.arg] = default.value
+                assert defaults.get("evaluator") == "execution", (
+                    f"{rel}: evaluator defaults to {defaults.get('evaluator')!r}, must be 'execution'"
+                )
+                found = True
+        assert found, f"create_action_graph not found in {rel}"

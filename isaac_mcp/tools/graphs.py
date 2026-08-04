@@ -40,7 +40,7 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         nodes: Optional[List[Dict[str, str]]] = None,
         connections: Optional[List[List[str]]] = None,
         values: Optional[List[Dict[str, object]]] = None,
-        evaluator: str = "push",
+        evaluator: str = "execution",
         script_file: Optional[str] = None,
         inline_script: Optional[str] = None,
     ) -> str:
@@ -60,7 +60,10 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             values: List of attribute value overrides. Each dict has:
                 - "attr": Full attribute path (e.g. "ScriptNode.inputs:script")
                 - "value": The value to set
-            evaluator: Graph evaluator type (default "push").
+            evaluator: Graph evaluator type (default "execution", what Action
+                Graphs use). "push" evaluates every application update regardless
+                of the timeline, so an OnPlaybackTick-driven ScriptNode would keep
+                running even while the simulation is stopped.
             script_file: Convenience shortcut — path to a local Python script file.
                 When provided, automatically creates OnPlaybackTick → ScriptNode nodes,
                 wires them, and attaches the script file (sets usePath + scriptPath).

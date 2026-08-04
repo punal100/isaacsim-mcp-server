@@ -64,7 +64,7 @@ def create_action_graph(
     nodes: Optional[List[Dict[str, str]]] = None,
     connections: Optional[List[List[str]]] = None,
     values: Optional[List[Dict[str, object]]] = None,
-    evaluator: str = "push",
+    evaluator: str = "execution",
     script_file: Optional[str] = None,
     inline_script: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -76,6 +76,20 @@ def create_action_graph(
     When inline_script is provided instead, the same OnPlaybackTick → ScriptNode
     pair is created and wired, but the script is set inline via inputs:script
     with inputs:usePath=False.
+
+    The evaluator defaults to "execution", the one Action Graphs are built on.
+    It used to default to "push", which evaluates the graph on every application
+    update regardless of the timeline, bypassing the OnPlaybackTick gating this
+    function wires up. Measured on 6.0.1 with two otherwise identical graphs and
+    the timeline stopped: the push graph's ScriptNode kept running (its marker
+    advanced past 5000 ticks), while the execution graph stayed frozen and only
+    advanced during play.
+
+    That is not merely wasteful. A ScriptNode controller left running re-commands
+    the robot on every update, silently discarding the caller's
+    set_joint_positions during the step-only debug loop, and it keeps running
+    after stop_simulation — contradicting the documented model that graphs tick
+    only while playing.
     """
     try:
         import omni.graph.core as og
