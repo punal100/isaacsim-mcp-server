@@ -167,11 +167,19 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 continue
             for entry in entries:
                 name = entry.relative_path.rstrip("/")
+                # Skip hidden directories. Every asset folder keeps a ".thumbs"
+                # of "<name>.thumb.usd" previews, which otherwise registered as
+                # environments named e.g. "grid_.thumbs" pointing at a
+                # thumbnail: 8 of the 36 entries returned on 6.0.1 were these.
+                if name.lstrip("/").startswith("."):
+                    continue
                 dir_path = root + base + name + "/"
                 r2, files = omni.client.list(dir_path)
                 if r2 != omni.client.Result.OK:
                     continue
                 for f in files:
+                    if f.relative_path.endswith(".thumb.usd"):
+                        continue  # preview image, not an environment
                     if f.relative_path.endswith(".usd") or f.relative_path.endswith(".usda"):
                         key = name.lower().replace(" ", "_")
                         if key not in discovered:
@@ -182,10 +190,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
                         break
                 for f in files:
                     subname = f.relative_path.rstrip("/")
+                    if subname.lstrip("/").startswith("."):
+                        continue
                     r3, subfiles = omni.client.list(dir_path + subname + "/")
                     if r3 != omni.client.Result.OK:
                         continue
                     for sf in subfiles:
+                        if sf.relative_path.endswith(".thumb.usd"):
+                            continue
                         if sf.relative_path.endswith(".usd") or sf.relative_path.endswith(".usda"):
                             key = f"{name}_{subname}".lower().replace(" ", "_")
                             if key not in discovered:
@@ -1002,9 +1014,21 @@ class IsaacAdapterV6(IsaacAdapterBase):
             sensor = LidarSensor(path=prim_path, annotators=["generic-model-output"])
             self._lidar_sensors[prim_path] = sensor
         data, info = sensor.get_data("generic-model-output")
-        if data is None:
+        array = None
+        if data is not None:
+            array = data.numpy() if hasattr(data, "numpy") else np.asarray(data)
+        # LidarSensor signals "nothing rendered yet" with an empty array rather
+        # than None (measured on 6.0.1: shape (0,), info {}), unlike CameraSensor
+        # which returns None — so testing only for None missed the empty case.
+        #
+        # Deliberately no _request_render_frame() here. A single Replicator frame
+        # fills a camera but not a lidar: measured on 6.0.1 with the orchestrator
+        # at STEPPED and the request completed, the sensor was still empty, and
+        # only play_simulation produced data. Requesting one would just make the
+        # caller retry forever.
+        if array is None or getattr(array, "size", 0) == 0:
             return np.zeros((0, 3), dtype=np.float32)
-        return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
+        return array
 
     # ── Materials ──────────────────────────────────────────
 

@@ -124,12 +124,20 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 continue
             for entry in entries:
                 name = entry.relative_path.rstrip("/")
+                # Skip hidden directories. Every asset folder keeps a ".thumbs"
+                # of "<name>.thumb.usd" previews, which otherwise registered as
+                # environments named e.g. "grid_.thumbs" pointing at a
+                # thumbnail: 8 of the 36 entries returned on 6.0.1 were these.
+                if name.lstrip("/").startswith("."):
+                    continue
                 dir_path = root + base + name + "/"
                 r2, files = omni.client.list(dir_path)
                 if r2 != omni.client.Result.OK:
                     continue
                 # Find USD files at this level
                 for f in files:
+                    if f.relative_path.endswith(".thumb.usd"):
+                        continue  # preview image, not an environment
                     if f.relative_path.endswith(".usd") or f.relative_path.endswith(".usda"):
                         key = name.lower().replace(" ", "_")
                         if key not in discovered:
@@ -141,10 +149,14 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 # Also check one level deeper for nested envs
                 for f in files:
                     subname = f.relative_path.rstrip("/")
+                    if subname.lstrip("/").startswith("."):
+                        continue
                     r3, subfiles = omni.client.list(dir_path + subname + "/")
                     if r3 != omni.client.Result.OK:
                         continue
                     for sf in subfiles:
+                        if sf.relative_path.endswith(".thumb.usd"):
+                            continue
                         if sf.relative_path.endswith(".usd") or sf.relative_path.endswith(".usda"):
                             key = f"{name}_{subname}".lower().replace(" ", "_")
                             if key not in discovered:

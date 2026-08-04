@@ -60,7 +60,11 @@ class _AdapterWithRenderRequest(_Adapter):
 
     def __init__(self, image):
         super().__init__(image)
+        self._render_request = None  # starts None, as the real adapter does
+
+    def _request_render_frame(self):
         self._render_request = object()
+        return True
 
 
 def test_capture_reports_an_error_when_no_frame_is_available():
@@ -184,3 +188,61 @@ def test_v5_capture_reuses_the_camera_and_keeps_its_resolution(monkeypatch):
     assert _V5Camera.instances[0].resolution == (640, 480)
     assert first.size == 0
     assert second.shape == (480, 640, 4)
+
+
+# ── lidar ────────────────────────────────────────────────────────────────────
+
+
+class _LidarAdapter:
+    def __init__(self, points):
+        self._points = points
+
+    def get_lidar_point_cloud(self, prim_path):
+        return self._points
+
+
+class _LidarAdapterWithRenderRequest(_LidarAdapter):
+    def __init__(self, points):
+        super().__init__(points)
+        self._render_request = None  # starts None, as the real adapter does
+
+    def _request_render_frame(self):
+        self._render_request = object()
+        return True
+
+
+def test_lidar_reports_an_error_when_no_frame_is_available():
+    """ "Got 0 points" with status success is indistinguishable from a lidar
+    aimed at empty space. RTX sensor data only flows while Replicator captures,
+    so an empty read on a stopped timeline means "no frame", not "no hits"."""
+    from isaac_sim_mcp_extension.handlers.sensors import get_point_cloud
+
+    result = get_point_cloud(_LidarAdapter([]), prim_path="/World/Lidar")
+
+    assert result["status"] == "error"
+    assert "/World/Lidar" in result["message"]
+    assert result["point_count"] == 0
+
+
+def test_lidar_success_reports_the_point_count():
+    from isaac_sim_mcp_extension.handlers.sensors import get_point_cloud
+
+    result = get_point_cloud(_LidarAdapter([(0, 0, 0)] * 7), prim_path="/World/Lidar")
+
+    assert result["status"] == "success"
+    assert result["point_count"] == 7
+
+
+def test_lidar_does_not_promise_that_retrying_will_work():
+    """A single Replicator frame fills a camera but not a lidar.
+
+    Measured on 6.0.1: with the orchestrator at STEPPED and the render request
+    completed, the sensor was still empty; only play_simulation produced data.
+    Telling the caller to "call again to collect it" would loop forever.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import get_point_cloud
+
+    for adapter in (_LidarAdapter([]), _LidarAdapterWithRenderRequest([])):
+        message = get_point_cloud(adapter, prim_path="/World/Lidar")["message"]
+        assert "render has been requested" not in message
+        assert "play_simulation" in message
