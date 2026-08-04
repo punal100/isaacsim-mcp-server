@@ -59,6 +59,24 @@ def capture_image(
 ) -> Dict[str, Any]:
     try:
         image_data = adapter.capture_camera_image(prim_path)
+        # An RTX sensor with no frame yet yields an empty array, not an error.
+        # Reporting that as success gave back {"shape": [0]} with status
+        # "success", which a caller cannot tell apart from a captured image —
+        # and with output_path set it fed an empty array to Image.fromarray.
+        # Verified on Isaac Sim 6.0.1: in the step-only debug loop the timeline
+        # never plays, Replicator's orchestrator therefore stays STOPPED
+        # (/omni/replicator/captureOnPlay defaults to True), and every capture
+        # returned an empty array while reporting success.
+        if image_data is None or getattr(image_data, "size", 0) == 0:
+            return {
+                "status": "error",
+                "message": (
+                    f"No frame available from {prim_path}. RTX sensor data is produced by "
+                    "Replicator, which by default only captures while the timeline is playing "
+                    "(/omni/replicator/captureOnPlay). Play the simulation, or capture again "
+                    "once a frame has been rendered."
+                ),
+            }
         if output_path:
             from PIL import Image
 
