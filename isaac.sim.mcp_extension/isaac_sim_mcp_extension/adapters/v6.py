@@ -1268,7 +1268,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
             current_time = timeline.get_current_time()
         stage = self.get_stage()
         physics_dt = 1.0 / 60.0
-        for prim in stage.Traverse():
+        # Kit accepts MCP commands before it has created a stage — measured on
+        # 6.0.1 the socket opens 2.86s ahead of it, and 5.1.0 behaves the same.
+        # Traversing None there raised "'NoneType' object has no attribute
+        # 'Traverse'", turning a routine status query into an opaque error during
+        # startup. The timeline state is still knowable, so report that and fall
+        # back to the default physics_dt.
+        prims = stage.Traverse() if stage is not None else []
+        for prim in prims:
             try:
                 if prim.IsA(UsdPhysics.Scene):
                     time_step_attr = prim.GetAttribute("physxScene:timeStepsPerSecond")

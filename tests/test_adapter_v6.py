@@ -848,3 +848,55 @@ def test_v6_requests_a_new_frame_once_the_previous_request_finished(monkeypatch)
     adapter._request_render_frame()
 
     assert len(scheduled) == 2
+
+
+def test_v6_get_simulation_state_survives_a_missing_stage(monkeypatch):
+    """Kit accepts commands ~2.9s before it creates a stage.
+
+    Traversing None there raised "'NoneType' object has no attribute 'Traverse'"
+    — an opaque failure for a routine status query. The timeline state is still
+    knowable, so it must be reported.
+    """
+
+    class _Timeline:
+        def is_playing(self):
+            return False
+
+        def is_stopped(self):
+            return True
+
+        def get_current_time(self):
+            return 0.0
+
+    class _SM:
+        @classmethod
+        def get_active_physics_engine(cls):
+            return "physx"
+
+        @classmethod
+        def get_simulation_time(cls):
+            return 0.0
+
+    monkeypatch.setitem(sys.modules, "isaacsim.core.simulation_manager", types.SimpleNamespace(SimulationManager=_SM))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.1"))
+
+    fake_timeline = types.ModuleType("omni.timeline")
+    fake_timeline.get_timeline_interface = lambda: _Timeline()
+    fake_usd = types.ModuleType("omni.usd")
+    fake_usd.get_context = lambda: types.SimpleNamespace(get_stage=lambda: None)  # no stage yet
+    fake_omni = types.ModuleType("omni")
+    fake_omni.timeline = fake_timeline
+    fake_omni.usd = fake_usd
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline)
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd)
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    state = v6_mod.IsaacAdapterV6().get_simulation_state()
+
+    assert state["timeline_state"] == "stopped"
+    assert state["physics_dt"] == 1.0 / 60.0
