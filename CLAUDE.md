@@ -18,7 +18,8 @@ Live testing (unit tests alone are **not** sufficient — CONTRIBUTING requires 
 ```bash
 ./scripts/run_isaac_sim.sh              # Kit + extension; --newton / --physx / ISAACSIM_ENGINE
 ./scripts/dev_mcp_server.sh             # MCP server + extension hot-reload watcher
-python scripts/smoke_test_v6.py         # one socket command per V6 surface, pass/fail per check
+python scripts/smoke_test.py            # one socket command per surface, pass/fail per check
+python scripts/smoke_test.py --port 8767   # a second instance (e.g. 5.1 alongside 6.0)
 ./.venv/bin/python -m mcp dev ./isaac_mcp/server.py   # MCP inspector on :5173
 ```
 

@@ -21,20 +21,40 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Live smoke test against a running Isaac Sim 6.0 + MCP extension.
+"""Live smoke test against a running Isaac Sim + MCP extension.
 
-Connects to the extension socket (default localhost:8766), sends one
-command per V6 surface area, and prints pass/fail per check.
+Connects to the extension socket (default localhost:8766), sends one command
+per surface area, and prints pass/fail per check. Unit tests cannot cover any
+of this: every check here needs a real physics step, a real USD stage, or a
+real OmniGraph, and the fakes that would stand in for them are exactly what
+let a wrong assumption reach a release.
+
+Runs against **either** supported runtime and adapts:
+    - Isaac Sim 6.0 (V6 adapter, PhysX or Newton) — additionally asserts the
+      engine / isaacsim_version reporting fields.
+    - Isaac Sim 5.1 (V5 adapter) — asserts those V6-only fields are absent,
+      so a misdetected adapter fails the run instead of passing quietly.
+
+Which runtime is in use is detected from simulation.get_state rather than
+passed in, so pointing this at a port is enough.
 
 Prerequisites:
-    1. Isaac Sim 6.0 running with the MCP extension enabled
-       (either via isaac-sim.sh or isaac-sim.newton.sh).
-    2. The extension has been hot-reloaded with the V6 code on disk
-       (run scripts/dev_mcp_server.sh once, then this script).
+    1. Isaac Sim running with the MCP extension enabled (isaac-sim.sh,
+       isaac-sim.newton.sh, or scripts/run_isaac_sim.sh).
+    2. The extension is running the code on disk. Kit reloads the extension
+       itself when its files change; scripts/dev_mcp_server.sh does it on
+       demand.
 
 Usage:
-    python scripts/smoke_test_v6.py
-    python scripts/smoke_test_v6.py --port 8767
+    python scripts/smoke_test.py                 # default port 8766
+    python scripts/smoke_test.py --port 8767     # a second instance
+
+Both runtimes can be smoke-tested side by side by launching them on separate
+ports:
+
+    ./scripts/run_isaac_sim.sh
+    ISAACSIM_ROOT=~/isaacsim-5.1.0 ./scripts/run_isaac_sim.sh \\
+        --/exts/isaac.sim.mcp/server.port=8767
 """
 
 from __future__ import annotations
@@ -94,21 +114,43 @@ def main() -> int:
 
     results = []
 
-    # 1. Engine + version field exposed by V6
+    # 1. Which adapter answered? V6 reports engine + isaacsim_version;
+    #    V5 has neither. That difference is the detector, and each runtime then
+    #    gets the assertion that is true *for it* — V5 must not grow the V6
+    #    fields, and V6 must not lose them.
     resp = send(args.host, args.port, "simulation.get_state", {})
+    state = resp.get("result", {})
+    is_v6 = "engine" in state or "isaacsim_version" in state
+    engine = state.get("engine", "n/a")
 
-    def _check_state(r: Dict[str, Any]) -> tuple[bool, str]:
-        if "engine" not in r:
-            return False, "missing 'engine' field — V5 adapter is in use, not V6"
-        if r["engine"] not in ("physx", "newton", "remotesim"):
-            return False, f"unexpected engine: {r.get('engine')}"
-        if "isaacsim_version" not in r or not r["isaacsim_version"].startswith("6."):
-            return False, f"unexpected isaacsim_version: {r.get('isaacsim_version')}"
-        return True, ""
+    if is_v6:
 
-    results.append(check("simulation.get_state shows engine + isaacsim_version", resp, _check_state))
-    engine = resp.get("result", {}).get("engine", "unknown")
-    print(f"        engine={engine}, version={resp.get('result', {}).get('isaacsim_version')}")
+        def _check_state(r: Dict[str, Any]) -> tuple[bool, str]:
+            if r.get("engine") not in ("physx", "newton", "remotesim"):
+                return False, f"unexpected engine: {r.get('engine')}"
+            version = r.get("isaacsim_version")
+            if not isinstance(version, str) or not version.startswith("6."):
+                # A tuple repr ("('6.0.1', 'rc.7', ...)") lands here: 6.0's
+                # get_version() returns an 8-tuple, and str()-ing it leaks a
+                # Python repr to every MCP client.
+                return False, f"unexpected isaacsim_version: {version!r}"
+            return True, ""
+
+        results.append(check("simulation.get_state shows engine + isaacsim_version", resp, _check_state))
+    else:
+
+        def _check_state_v5(r: Dict[str, Any]) -> tuple[bool, str]:
+            leaked = [k for k in ("engine", "isaacsim_version") if k in r]
+            if leaked:
+                return False, f"V5 reported V6-only fields: {leaked}"
+            for required in ("timeline_state", "physics_dt"):
+                if required not in r:
+                    return False, f"missing '{required}' in get_state"
+            return True, ""
+
+        results.append(check("simulation.get_state (V5 shape, no V6-only fields)", resp, _check_state_v5))
+
+    print(f"        adapter={'V6' if is_v6 else 'V5'}, engine={engine}, version={state.get('isaacsim_version', 'n/a')}")
 
     # 2. Scene info round-trip
     resp = send(args.host, args.port, "scene.get_info", {})
@@ -264,19 +306,23 @@ def main() -> int:
     # 5. URDF import round-trip is skipped because it requires a local URDF
     #    file in a known location — verified separately in the demo.
 
-    # 6. Sensor smoke (camera only; lidar configs vary by Isaac Sim build)
-    if engine in ("physx", "newton"):
-        resp = send(
-            args.host,
-            args.port,
-            "sensors.create_camera",
-            {
-                "prim_path": "/World/SmokeCamera",
-                "position": [3.0, 0.0, 2.0],
-                "resolution": [320, 240],
-            },
-        )
-        results.append(check("sensors.create_camera (experimental.rtx.RtxCamera)", resp))
+    # 6. Sensor smoke (camera only; lidar configs vary by Isaac Sim build).
+    #    Both adapters implement this over different backends — V6 on
+    #    isaacsim.sensors.experimental.rtx.RtxCamera, V5 on
+    #    isaacsim.sensors.camera.Camera — so it is checked on both rather than
+    #    gated behind a V6-only engine value.
+    resp = send(
+        args.host,
+        args.port,
+        "sensors.create_camera",
+        {
+            "prim_path": "/World/SmokeCamera",
+            "position": [3.0, 0.0, 2.0],
+            "resolution": [320, 240],
+        },
+    )
+    backend = "experimental.rtx.RtxCamera" if is_v6 else "sensors.camera.Camera"
+    results.append(check(f"sensors.create_camera ({backend})", resp))
 
     # 7. reload_script recompiles a matching Action-Graph ScriptNode (manual,
     #    exercises the ScriptNode-aware path added for the reload_script fix).
@@ -334,7 +380,8 @@ def main() -> int:
 
     print()
     passed = sum(1 for r in results if r)
-    print(f"{passed}/{len(results)} checks passed.")
+    adapter = "V6" if is_v6 else "V5"
+    print(f"{passed}/{len(results)} checks passed ({adapter} adapter, engine={engine}).")
     return 0 if passed == len(results) else 1
 
 

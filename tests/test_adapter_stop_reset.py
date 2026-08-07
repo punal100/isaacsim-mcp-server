@@ -21,7 +21,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Verify stop() performs a physics reset (AST) — live behaviour is in smoke_test_v6."""
+"""Verify stop() performs a physics reset (AST) — live behaviour is in smoke_test.py."""
 
 import ast
 import os
