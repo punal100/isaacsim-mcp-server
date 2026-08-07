@@ -797,6 +797,23 @@ class IsaacAdapterV6(IsaacAdapterBase):
         free — measured at ~1.4s of fall — which is exactly the imprecision
         step_simulation exists to remove.
 
+        Queueing alone is not enough: the transition is tick-driven, so it lands
+        a tick *after* this returns, and a stop_simulation issued promptly finds
+        no restore point and silently keeps the stepped pose. Measured on 6.0.1:
+        a cube stepped from z=2.0 stayed at z=-3.32 through stop when the two
+        calls were back to back, and reset correctly with any delay between
+        them -- so the bug hid behind human-speed interaction and only bites the
+        agent-speed debug loop this tool exists to serve. One app.update() lands
+        the transition before returning, which is exactly the piece of the V5
+        step this adapter otherwise avoids.
+
+        That single pump is deliberately *not* the pumped stepping V5 does: see
+        step(), which keeps SimulationManager.step for the physics so no frame
+        ever runs free. Verified on 6.0.1/physx -- pump-to-arm reproduces V6's
+        exact stepped result (z=-3.322, identical to no arming) while V5-style
+        pumped stepping lands at z=-2.987, and the reset then works with no
+        delay, 3/3. Re-check under Newton before assuming it holds there.
+
         Only arms while the timeline is stopped, so it re-arms once per run and
         never disturbs a genuine Play already in progress.
         """
@@ -807,6 +824,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
             if timeline.is_stopped():
                 timeline.play()
                 timeline.pause()
+                try:
+                    import omni.kit.app
+
+                    omni.kit.app.get_app().update()
+                except Exception:
+                    # Pumping from inside the dispatch coroutine is the hazard
+                    # step() documents. It did not reproduce here on
+                    # 6.0.1/physx, but if it ever does, losing the pump costs
+                    # only the reset -- degrading to the old tick-late
+                    # behaviour -- and must not break stepping itself.
+                    pass
         except Exception:
             # Best effort: failing to arm costs the ability to reset, but must
             # never stop the caller from stepping.
@@ -1217,16 +1245,30 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # dispatch coroutine on Kit 107 (Isaac Sim 6.0). SocketServer
         # ._dispatch_command documents this as a hard constraint on handlers.
         #
-        # Do NOT "fix" stop_simulation's inability to reset a step-only run by
-        # driving the timeline with app.update() here, the way V5 does. It looks
-        # like it works — the physics is exact and stop then restores the spawn
-        # pose — but it floods the log with
+        # Do NOT drive the *stepping* with app.update() here, the way V5 does.
+        # Two separate reasons, and only the second is fatal:
+        #
+        # 1. It changes the physics. Pumped stepping runs real frames at the
+        #    app's cadence and cannot stop the timeline on an exact boundary,
+        #    so the same 60-frame fall lands at z=-2.987 instead of the
+        #    SimulationManager.step result of z=-3.322, and the timeline is
+        #    still playing on return — free-running between MCP calls is the
+        #    imprecision step_simulation exists to remove.
+        # 2. It has been observed to flood the log with
         #     RuntimeError: Cannot enter into task <...> while another task
         #     <SocketServer._dispatch_command...execute_wrapper> is being executed
         # killing unrelated kit tasks mid-flight (property window, viewport,
         # USD cache listener, throttling, HTTP server) and invalidating the
         # physics tensor view, after which get_velocities/get_transforms fail
-        # with "Simulation view object is invalidated". Verified on 6.0.1.
+        # with "Simulation view object is invalidated".
+        #
+        # That flood did not reproduce on 6.0.1/physx when re-checked: 60
+        # pumped updates from inside this coroutine logged no task errors and
+        # left the tensor view valid, so the hazard is evidently state- or
+        # backend-dependent rather than unconditional. Treat it as real but not
+        # universal, and keep the exactness argument in (1) as the standing
+        # reason. _arm_reset_point does pump exactly once, guarded, because a
+        # tick-late restore point breaks stop_simulation outright.
         from isaacsim.core.simulation_manager import SimulationManager
 
         self._ensure_physics_world()

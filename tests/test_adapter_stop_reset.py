@@ -50,6 +50,66 @@ def test_v6_stop_resets_physics():
     assert "stop()" in src  # still stops the timeline first
 
 
+def test_v6_arm_reset_point_lands_the_transition_before_returning():
+    """The restore point must exist when _arm_reset_point returns, not a tick later.
+
+    Arming queues timeline.play() + pause(), and timeline transitions are
+    tick-driven. Without pumping once, step() returns before PhysX has a
+    restore point, so a stop_simulation issued promptly finds nothing to
+    restore and silently keeps the stepped pose -- measured on 6.0.1 as a cube
+    stuck at z=-3.32 instead of its spawn z=2.0, deterministically, while any
+    delay before the stop masked it.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    calls = []
+
+    timeline = MagicMock()
+    timeline.is_stopped.return_value = True
+    timeline.play.side_effect = lambda: calls.append("play")
+    timeline.pause.side_effect = lambda: calls.append("pause")
+
+    fake_timeline_mod = types.ModuleType("omni.timeline")
+    fake_timeline_mod.get_timeline_interface = lambda: timeline
+
+    app = MagicMock()
+    app.update.side_effect = lambda: calls.append("update")
+    fake_app_mod = types.ModuleType("omni.kit.app")
+    fake_app_mod.get_app = lambda: app
+
+    # Import before swapping: the package __init__ pulls omni.ext, which the
+    # conftest stub provides. _arm_reset_point imports omni.timeline /
+    # omni.kit.app at call time, so the swap only has to cover the call.
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    fake_omni = types.ModuleType("omni")
+    fake_kit = types.ModuleType("omni.kit")
+    fake_omni.kit = fake_kit
+    fake_omni.timeline = fake_timeline_mod
+    fake_kit.app = fake_app_mod
+
+    keys = ("omni", "omni.kit", "omni.kit.app", "omni.timeline")
+    saved = {k: sys.modules.get(k) for k in keys}
+    sys.modules["omni"] = fake_omni
+    sys.modules["omni.kit"] = fake_kit
+    sys.modules["omni.kit.app"] = fake_app_mod
+    sys.modules["omni.timeline"] = fake_timeline_mod
+    try:
+        v6_mod.IsaacAdapterV6._arm_reset_point(object.__new__(v6_mod.IsaacAdapterV6))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    assert calls[:2] == ["play", "pause"], f"expected play then pause, got {calls}"
+    assert "update" in calls, "transition was never pumped, so it lands a tick late (or never)"
+    assert calls.index("update") > calls.index("pause"), "must pump after pause, not between play and pause"
+
+
 def test_v5_stop_stops_the_timeline_and_does_not_call_world_reset():
     """V5 stop() must leave the timeline STOPPED.
 
