@@ -26,7 +26,8 @@
 from __future__ import annotations
 
 import os
-import re
+
+from .version import major_version
 
 
 def _detect_isaacsim_major_version() -> int:
@@ -34,17 +35,11 @@ def _detect_isaacsim_major_version() -> int:
     try:
         from isaacsim.core.version import get_version  # type: ignore
 
-        # get_version() returns a string in 5.x ("5.1.0") and a tuple in 6.0
-        # (("6.0.0", "rc.59", "6", "0", "0", ...)). Pick the first element when
-        # given a sequence, otherwise treat as a string.
-        version_value = get_version()
-        if isinstance(version_value, (list, tuple)) and version_value:
-            version_str = str(version_value[0])
-        else:
-            version_str = str(version_value)
-        match = re.match(r"^(\d+)\.", version_str)
-        if match:
-            return int(match.group(1))
+        # get_version() returns a string in 5.x and an 8-tuple in 6.0 —
+        # major_version() owns that duality (see adapters/version.py).
+        major = major_version(get_version())
+        if major:
+            return major
     except Exception:
         pass
 
@@ -57,10 +52,9 @@ def _detect_isaacsim_major_version() -> int:
         if os.path.isfile(version_file):
             try:
                 with open(version_file) as f:
-                    text = f.read().strip()
-                match = re.match(r"^(\d+)\.", text)
-                if match:
-                    return int(match.group(1))
+                    major = major_version(f.read().strip())
+                if major:
+                    return major
             except OSError:
                 continue
     return 0

@@ -292,6 +292,80 @@ def test_v6_get_simulation_state_includes_engine_and_version(monkeypatch):
     assert state["timeline_state"] == "stopped"
 
 
+# The real isaacsim.core.version.get_version() on 6.0 is typed
+# `-> tuple[str, str, str, str, str, str, str, str]` and returns
+# (core, prerelease, major, minor, patch, pretag, prebuild, buildtag).
+# Captured verbatim from a live Isaac Sim 6.0.1 runtime. Every other fake in
+# this file returns a *string*, which is the 5.x shape the 6.x runtime never
+# produces — so nothing here exercised the shape the adapter actually receives.
+REAL_V6_VERSION_TUPLE = ("6.0.1", "rc.7", "6", "0", "1", "rc", "7", "release.42383.32955d8d.gl")
+
+
+def test_detect_version_handles_real_6x_version_tuple(monkeypatch):
+    """Detection must read the major from the tuple 6.0 actually returns."""
+    fake_version_mod = types.ModuleType("isaacsim.core.version")
+    fake_version_mod.get_version = lambda: REAL_V6_VERSION_TUPLE
+    monkeypatch.setitem(sys.modules, "isaacsim", types.ModuleType("isaacsim"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core", types.ModuleType("isaacsim.core"))
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", fake_version_mod)
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters as adapters_mod
+
+    importlib.reload(adapters_mod)
+    assert adapters_mod._detect_isaacsim_major_version() == 6
+
+
+def test_v6_reports_a_human_version_from_the_real_tuple(monkeypatch):
+    """isaacsim_version must be a version string, not the repr of a tuple.
+
+    str(get_version()) yields "('6.0.1', 'rc.7', ...)" — a Python repr that
+    leaks to every MCP client through get_simulation_state.
+    """
+    fake_timeline_iface = MagicMock()
+    fake_timeline_iface.is_playing.return_value = False
+    fake_timeline_iface.is_stopped.return_value = True
+    fake_timeline_iface.get_current_time.return_value = 0.0
+    fake_timeline_mod = types.ModuleType("omni.timeline")
+    fake_timeline_mod.get_timeline_interface = lambda: fake_timeline_iface
+    fake_omni_mod = types.ModuleType("omni")
+    monkeypatch.setitem(sys.modules, "omni", fake_omni_mod)
+    monkeypatch.setitem(sys.modules, "omni.timeline", fake_timeline_mod)
+    fake_omni_mod.timeline = fake_timeline_mod
+
+    class _Stage:
+        def Traverse(self):
+            return []
+
+    fake_usd_mod = types.ModuleType("omni.usd")
+    fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
+    fake_omni_mod.usd = fake_usd_mod
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type("SM", (), {"get_active_physics_engine": classmethod(lambda cls: "physx")})
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.version",
+        types.SimpleNamespace(get_version=lambda: REAL_V6_VERSION_TUPLE),
+    )
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    adapter = v6_mod.IsaacAdapterV6()
+    state = adapter.get_simulation_state()
+    assert state["isaacsim_version"] == "6.0.1-rc.7"
+
+
 def test_v6_engine_is_read_live_not_cached_at_construction(monkeypatch):
     """The engine must track SimulationManager, not a snapshot from __init__.
 

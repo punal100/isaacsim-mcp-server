@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .base import IsaacAdapterBase
+from .version import version_string
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -78,7 +79,8 @@ class IsaacAdapterV6(IsaacAdapterBase):
         try:
             from isaacsim.core.version import get_version
 
-            self._isaacsim_version = str(get_version())
+            # 6.0 returns an 8-tuple, not a string — see adapters/version.py.
+            self._isaacsim_version = version_string(get_version())
         except Exception:
             self._isaacsim_version = "unknown"
         # Articulation cache keyed by prim_path. Tensor-backed Articulations
