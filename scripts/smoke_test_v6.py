@@ -138,12 +138,12 @@ def main() -> int:
 
     results.append(check("scene.get_prim_info on cube", resp, _is_cube))
 
-    # 4. Create a physics scene + ground plane, play, step a few frames
+    # 4. Create a physics scene + ground plane, then step on a FROZEN timeline.
+    #    step_simulation refuses to run while the timeline is playing (it is the
+    #    step-only debug loop), so play is exercised separately below rather
+    #    than before the step.
     resp = send(args.host, args.port, "simulation.set_physics", {"gravity": [0.0, 0.0, -9.81]})
     results.append(check("simulation.set_physics (creates PhysicsScene)", resp))
-
-    resp = send(args.host, args.port, "simulation.play", {})
-    results.append(check("simulation.play", resp))
 
     resp = send(
         args.host,
@@ -165,8 +165,31 @@ def main() -> int:
 
     results.append(check("simulation.step with observe_prims (physics view read)", resp, _stepped))
 
+    # play is the final-run mode, not part of the debug loop — exercise it on
+    # its own, after the stepping is done.
+    resp = send(args.host, args.port, "simulation.play", {})
+    results.append(check("simulation.play", resp))
+
     resp = send(args.host, args.port, "simulation.stop", {})
     results.append(check("simulation.stop", resp))
+
+    # step_simulation must refuse to run while the timeline is playing; that
+    # guard is the contract the debug loop depends on, so assert it holds.
+    send(args.host, args.port, "simulation.play", {})
+    resp = send(args.host, args.port, "simulation.step", {"num_steps": 1})
+
+    def _refused(r: Dict[str, Any]) -> tuple[bool, str]:
+        return False, "step was accepted while the timeline was playing"
+
+    refused = resp.get("status") == "error" and "running" in str(resp.get("message", ""))
+    results.append(
+        check(
+            "simulation.step refuses to run while playing",
+            {"status": "success"} if refused else resp,
+            None if refused else _refused,
+        )
+    )
+    send(args.host, args.port, "simulation.stop", {})
 
     # 4b. stop_simulation must reset the scene to spawn state: create a cube
     #     above the ground, play, step until it falls, stop, and verify the
@@ -185,12 +208,13 @@ def main() -> int:
             "prim_path": "/World/ResetCube",
             "size": 0.5,
             "position": [0.0, 0.0, spawn_z],
+            # Without this the prim has no rigid body and cannot fall, so the
+            # reset assertion below would pass its spawn Z trivially — while
+            # proving nothing about stop_simulation.
+            "physics_enabled": True,
         },
     )
     results.append(check("objects.create cube above ground (reset test)", resp))
-
-    resp = send(args.host, args.port, "simulation.play", {})
-    results.append(check("simulation.play (reset test)", resp))
 
     resp = send(
         args.host,
@@ -219,9 +243,11 @@ def main() -> int:
     resp = send(args.host, args.port, "scene.get_prim_info", {"prim_path": "/World/ResetCube"})
 
     def _back_at_spawn(r: Dict[str, Any]) -> tuple[bool, str]:
-        position = r.get("position")
+        # get_prim_info nests the transform: {"transform": {"position": [...]}}.
+        # There has never been a top-level "position" key.
+        position = (r.get("transform") or {}).get("position")
         if not position:
-            return False, "no position in prim_info"
+            return False, f"no transform.position in prim_info (keys: {sorted(r)})"
         z = position[2]
         if abs(z - spawn_z) > 1e-3:
             return False, f"expected z~={spawn_z} after stop, got z={z}"
