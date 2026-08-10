@@ -70,6 +70,22 @@ def apply_material(
     try:
         if not material_path or not target_prim_path:
             return {"status": "error", "message": "material_path and target_prim_path are required"}
+        # Check both prims first. Binding a path that does not exist otherwise
+        # surfaces as a raw USD C++ error naming NVIDIA's build tree
+        # ("UsdRelationship::SetTargets ... Cannot map <>"), which says nothing
+        # about which path was wrong. create_material auto-generates a path when
+        # none is given, so pointing at a guessed one is an easy mistake.
+        stage = adapter.get_stage()
+        for label, path in (("material_path", material_path), ("target_prim_path", target_prim_path)):
+            prim = stage.GetPrimAtPath(path) if stage else None
+            if prim is None or not prim.IsValid():
+                return {
+                    "status": "error",
+                    "message": (
+                        f"{label} '{path}' does not exist on the stage. "
+                        "Use the prim_path returned by create_material, or list_prims to find it."
+                    ),
+                }
         adapter.apply_material(material_path, target_prim_path)
         return {"status": "success", "message": f"Applied {material_path} to {target_prim_path}"}
     except Exception as e:

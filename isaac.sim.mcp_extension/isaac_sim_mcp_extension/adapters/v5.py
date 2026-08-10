@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .base import IsaacAdapterBase
+from .units import limit_units, normalize_limit
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -477,18 +478,18 @@ class IsaacAdapterV5(IsaacAdapterBase):
                     lo = rev.GetLowerLimitAttr().Get()
                     hi = rev.GetUpperLimitAttr().Get()
                     limit_entry["type"] = "revolute"
-                    limit_entry["lower"] = float(lo) if lo is not None else None
-                    limit_entry["upper"] = float(hi) if hi is not None else None
-                    limit_entry["units"] = "degrees"
+                    limit_entry["lower"] = normalize_limit(lo, "revolute")
+                    limit_entry["upper"] = normalize_limit(hi, "revolute")
+                    limit_entry["units"] = limit_units("revolute")
                     break
                 if desc.IsA(UsdPhysics.PrismaticJoint):
                     pris = UsdPhysics.PrismaticJoint(desc)
                     lo = pris.GetLowerLimitAttr().Get()
                     hi = pris.GetUpperLimitAttr().Get()
                     limit_entry["type"] = "prismatic"
-                    limit_entry["lower"] = float(lo) if lo is not None else None
-                    limit_entry["upper"] = float(hi) if hi is not None else None
-                    limit_entry["units"] = "meters"
+                    limit_entry["lower"] = normalize_limit(lo, "prismatic")
+                    limit_entry["upper"] = normalize_limit(hi, "prismatic")
+                    limit_entry["units"] = limit_units("prismatic")
                     break
             joint_limits.append(limit_entry)
 
@@ -672,8 +673,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
                     lower_attr = joint_api.GetLowerLimitAttr()
                     upper_attr = joint_api.GetUpperLimitAttr()
 
-                joint_data["lower_limit"] = lower_attr.Get() if lower_attr else None
-                joint_data["upper_limit"] = upper_attr.Get() if upper_attr else None
+                # USD keeps revolute limits in degrees; positions below are in
+                # radians. See adapters/units.py.
+                joint_type = joint_data["type"]
+                joint_data["lower_limit"] = normalize_limit(lower_attr.Get() if lower_attr else None, joint_type)
+                joint_data["upper_limit"] = normalize_limit(upper_attr.Get() if upper_attr else None, joint_type)
+                joint_data["limit_units"] = limit_units(joint_type)
 
                 # Get drive config
                 for drive_type in ["angular", "linear"]:
