@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .base import IsaacAdapterBase
+from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 from .version import version_string
 
@@ -241,33 +242,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
         rotation: Optional[Sequence[float]] = None,
         scale: Optional[Sequence[float]] = None,
     ) -> None:
-        from pxr import Gf, UsdGeom
+        from pxr import UsdGeom
 
         stage = self.get_stage()
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
         xformable = UsdGeom.Xformable(prim)
-        # Update existing ops in place; only add an op when the caller
-        # supplies a value AND the prim doesn't already have that op.
-        # ClearXformOpOrder() (the old behaviour) silently reset any axis
-        # the caller didn't pass to identity. AddTranslateOp() raises if
-        # the op is already in xformOpOrder, so we can't just call it
-        # again — look it up first.
-        existing = {op.GetName(): op for op in xformable.GetOrderedXformOps()}
-        if position is not None:
-            op = existing.get("xformOp:translate") or xformable.AddTranslateOp(
-                precision=UsdGeom.XformOp.PrecisionDouble
-            )
-            op.Set(Gf.Vec3d(*position))
-        if rotation is not None:
-            op = existing.get("xformOp:rotateXYZ") or xformable.AddRotateXYZOp(
-                precision=UsdGeom.XformOp.PrecisionDouble
-            )
-            op.Set(Gf.Vec3d(*rotation))
-        if scale is not None:
-            op = existing.get("xformOp:scale") or xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble)
-            op.Set(Gf.Vec3d(*scale))
+        # Which op holds the rotation, and where it sits relative to scale,
+        # decides whether a requested rotation replaces or compounds. See
+        # adapters/transforms.py.
+        set_transform(xformable, position=position, rotation=rotation, scale=scale)
 
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
         from pxr import UsdGeom
@@ -276,10 +261,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
-        xformable = UsdGeom.Xformable(prim)
-        local_transform = xformable.GetLocalTransformation()
-        translation = local_transform.ExtractTranslation()
-        return {"position": [translation[0], translation[1], translation[2]]}
+        return read_transform(UsdGeom.Xformable(prim))
 
     def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
         stage = self.get_stage()

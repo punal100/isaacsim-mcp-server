@@ -86,3 +86,4 @@ mcp_cache/
 
 # Code agents configurations
 .claude
+.mcp.json

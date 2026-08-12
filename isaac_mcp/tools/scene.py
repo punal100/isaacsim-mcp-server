@@ -98,8 +98,10 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def get_prim_info(prim_path: str) -> str:
         """Get detailed information about a specific prim.
 
-        Returns type, world-space position, and children. For geometric prims
-        (Cube, Sphere, Cylinder, Cone, Capsule), also returns actual_size [x, y, z]
+        Returns type, children, and a transform block holding position,
+        rotation [rx, ry, rz] in degrees (XYZ order, the same convention
+        transform_object accepts), and scale. For geometric prims (Cube,
+        Sphere, Cylinder, Cone, Capsule), also returns actual_size [x, y, z]
         in meters accounting for scale and default primitive dimensions.
 
         Args:
