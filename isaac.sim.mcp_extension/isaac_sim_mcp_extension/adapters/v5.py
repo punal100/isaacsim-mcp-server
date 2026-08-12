@@ -85,6 +85,10 @@ class IsaacAdapterV5(IsaacAdapterBase):
         # event subscriptions. See capture_camera_image.
         self._camera_sensors: Dict[str, Any] = {}
         self._initialized_cameras: set = set()
+        # Lidars need the same treatment as cameras, and for the same reason:
+        # the annotator must be attached before initialize() and survives only
+        # as long as the wrapper does. See get_lidar_point_cloud.
+        self._lidar_sensors: Dict[str, Any] = {}
 
     # ── Scene ──────────────────────────────────────────────
 
@@ -880,16 +884,51 @@ class IsaacAdapterV5(IsaacAdapterBase):
             return np.zeros((0,), dtype=np.uint8)
         return data
 
-    def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
+    # 5.1 exposes the decoded point cloud through this annotator; 6.0 replaced
+    # it with a packed generic-model-output buffer (see v6.get_lidar_point_cloud).
+    LIDAR_POINT_CLOUD_ANNOTATOR = "IsaacExtractRTXSensorPointCloudNoAccumulator"
+
+    def _lidar_sensor(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
+        """Return a cached LidarRtx with its point-cloud annotator live.
+
+        The annotator must be attached *before* initialize(): calling
+        initialize() first leaves the sensor with zero annotators and every
+        frame empty, measured on 5.1.0.
+        """
         from isaacsim.sensors.rtx import LidarRtx
 
-        return LidarRtx(prim_path=prim_path, config=config or "Example_Rotary", **kwargs)
+        sensor = self._lidar_sensors.get(prim_path)
+        if sensor is None:
+            # 5.1's LidarRtx takes config_file_name; passing `config` lands in
+            # **kwargs and collides with the kit command's own argument, raising
+            # "got multiple values for keyword argument 'config'".
+            sensor = LidarRtx(prim_path=prim_path, config_file_name=config or "Example_Rotary", **kwargs)
+            sensor.attach_annotator(self.LIDAR_POINT_CLOUD_ANNOTATOR)
+            sensor.initialize()
+            self._lidar_sensors[prim_path] = sensor
+        return sensor
+
+    def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
+        return self._lidar_sensor(prim_path, config=config, **kwargs)
 
     def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:
-        from isaacsim.sensors.rtx import LidarRtx
-
-        lidar = LidarRtx(prim_path=prim_path)
-        return lidar.get_point_cloud()
+        # LidarRtx has no get_point_cloud() on 5.1 — the old call raised
+        # "'LidarRtx' object has no attribute 'get_point_cloud'" on every read.
+        # Rebuilding the wrapper per call was equally fatal: a fresh one carries
+        # no annotator, so it could never return a frame.
+        sensor = self._lidar_sensor(prim_path)
+        frame = sensor.get_current_frame() or {}
+        payload = frame.get(self.LIDAR_POINT_CLOUD_ANNOTATOR)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if data is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        points = np.asarray(data)
+        # This annotator only yields on frames where a sweep completes, so an
+        # empty read is "not this frame", not "the lidar saw nothing" — the
+        # handler turns it into a retry message.
+        if points.size == 0 or points.ndim != 2 or points.shape[1] != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        return points.astype(np.float32)
 
     # ── Materials ──────────────────────────────────────────
 
