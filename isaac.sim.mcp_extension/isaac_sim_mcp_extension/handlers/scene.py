@@ -85,7 +85,40 @@ def create_physics(
         return {"status": "error", "message": str(e)}
 
 
-def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, Any]:
+def _clear_environment_contents(adapter: IsaacAdapterBase, stage) -> list:
+    """Empty /Environment of loaded content while keeping the default lighting.
+
+    Removes the reference arcs as well as the composed children: deleting only
+    the children leaves the arc behind, and the next load_environment then
+    composes a second reference on top of it.
+    """
+    env = stage.GetPrimAtPath("/Environment")
+    if not env or not env.IsValid():
+        return []
+    removed = []
+    for child in list(env.GetChildren()):
+        if child.GetName() == "defaultLight":
+            continue
+        path = str(child.GetPath())
+        try:
+            child.GetReferences().ClearReferences()
+        except Exception:
+            pass
+        adapter.delete_prim(path)
+        removed.append(child.GetName())
+    # Older callers referenced straight onto /Environment; undo that too, along
+    # with any axis/unit reconciliation transform authored for it.
+    try:
+        from pxr import UsdGeom
+
+        env.GetReferences().ClearReferences()
+        UsdGeom.Xformable(env).ClearXformOpOrder()
+    except Exception:
+        pass
+    return removed
+
+
+def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environment: bool = False) -> Dict[str, Any]:
     try:
         stage = adapter.get_stage()
         # Prims to never delete (system prims)
@@ -97,6 +130,13 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, An
             "/Render",
             "/Environment",
         }
+        # /Environment stays in keep_paths because it holds the stage's
+        # defaultLight, and a stage with no light renders black -- which reads
+        # as a broken sensor rather than a missing lamp. Its *contents* are a
+        # different matter: a loaded environment used to survive clear_scene
+        # entirely, so a later create_physics_scene(floor=True) stacked a second
+        # ground under the first and "clear" left a 100 m world in place.
+        removed_environment = _clear_environment_contents(adapter, stage) if not keep_environment else []
         # Clear all root-level prims (robots created at root, etc.)
         root_prim = stage.GetPseudoRoot()
         for child in root_prim.GetChildren():
@@ -118,7 +158,16 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, An
                 World.clear_instance()
         except Exception:
             pass  # Non-v5 runtimes / no World in play — nothing to invalidate.
-        return {"status": "success", "message": "Scene cleared"}
+        message = "Scene cleared"
+        if removed_environment:
+            message += f". Removed environment content: {', '.join(removed_environment)}"
+            message += " (pass keep_environment=true to preserve it)"
+        elif keep_environment:
+            message += ". Environment preserved"
+        result = {"status": "success", "message": message}
+        if removed_environment:
+            result["removed_environment"] = removed_environment
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -160,8 +209,106 @@ def list_environments(adapter: IsaacAdapterBase) -> Dict[str, Any]:
     return {"status": "success", "environment_count": len(library), "environments": library}
 
 
+# ── Environment reference reconciliation ───────────────────────────────────
+#
+# A referenced layer declares its own upAxis and metersPerUnit, and USD does not
+# reconcile either when the reference is composed. Measured across the shipped
+# library: 6 of 25 environments on 5.1 and 8 of 28 on 6.0 are Y-up, and 8 of 25 /
+# 10 of 28 are authored in centimetres. Loading one of those into the Z-up,
+# 1 m/unit stage this extension creates left it rotated 90 degrees AND 100x too
+# large -- a "ground" standing on edge, 10 km across, with its floor at z=-5000.
+# Neither adapter's add_reference_to_stage corrects it; this does.
+
+
+def _asset_axis_and_units(url: str):
+    """upAxis and metersPerUnit a referenced layer declares, or (None, None)."""
+    try:
+        from pxr import Sdf
+
+        layer = Sdf.Layer.FindOrOpen(url)
+        if layer is None:
+            return None, None
+        root = layer.pseudoRoot
+        # USD's defaults when unauthored, not a guess: Y-up, centimetres.
+        up = str(root.GetInfo("upAxis")) if root.HasInfo("upAxis") else "Y"
+        mpu = float(root.GetInfo("metersPerUnit")) if root.HasInfo("metersPerUnit") else 0.01
+        return up, mpu
+    except Exception:
+        return None, None
+
+
+def _reference_conversion(adapter: IsaacAdapterBase, prim_path: str, url: str) -> Dict[str, Any]:
+    """Report the axis/unit conversion USD applied to a freshly referenced prim.
+
+    USD authors xformOp:rotateX:unitsResolve / xformOp:scale:unitsResolve itself
+    when it composes a reference whose layer declares a different upAxis or
+    metersPerUnit -- but only when it *creates* the prim. Referencing onto a prim
+    that already exists (the old default /Environment, which the stage ships
+    holding defaultLight) skips that resolution entirely, and the environment
+    arrived rotated 90 degrees and 100x oversized: a ground standing on edge,
+    10 km across, floor at z=-5000.
+
+    So the fix is to reference onto a fresh child, not to correct by hand.
+    Correcting on top of USD's own ops squares the scale -- measured 0.0001
+    instead of 0.01, an environment 1 m across. This only reports what happened,
+    so the conversion is visible rather than magic.
+    """
+    from pxr import UsdGeom
+
+    asset_up, asset_mpu = _asset_axis_and_units(url)
+    if asset_up is None:
+        return {}
+    stage = adapter.get_stage()
+    if stage is None:
+        return {}
+    prim = stage.GetPrimAtPath(prim_path)
+    resolved = []
+    if prim and prim.IsValid():
+        resolved = [
+            op.GetName().split(":", 1)[-1]
+            for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+            if "unitsResolve" in op.GetName()
+        ]
+    stage_up = str(UsdGeom.GetStageUpAxis(stage))
+    stage_mpu = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
+    if asset_up == stage_up and abs((asset_mpu / stage_mpu if stage_mpu else 1.0) - 1.0) <= 1e-6:
+        return {}
+    applied: Dict[str, Any] = {"asset": {"up_axis": asset_up, "meters_per_unit": asset_mpu}}
+    if asset_up != stage_up:
+        applied["up_axis"] = f"{asset_up}->{stage_up}"
+    if abs((asset_mpu / stage_mpu if stage_mpu else 1.0) - 1.0) > 1e-6:
+        applied["scale"] = asset_mpu / stage_mpu
+    applied["applied_by"] = "usd" if resolved else "none"
+    if resolved:
+        applied["ops"] = resolved
+    return applied
+
+
+def _world_bounds(adapter: IsaacAdapterBase, prim_path: str) -> Dict[str, Any]:
+    """Extent and floor height of a loaded environment, so the caller can place
+    objects on it without a second round trip."""
+    try:
+        from pxr import Usd, UsdGeom
+
+        stage = adapter.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return {}
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        if rng.IsEmpty():
+            return {}
+        mn, mx = rng.GetMin(), rng.GetMax()
+        return {
+            "extent": [round(mx[i] - mn[i], 3) for i in range(3)],
+            "floor_height": round(mn[2], 3),
+        }
+    except Exception:
+        return {}
+
+
 def load_environment(
-    adapter: IsaacAdapterBase, environment: Optional[str] = None, prim_path: str = "/Environment"
+    adapter: IsaacAdapterBase, environment: Optional[str] = None, prim_path: Optional[str] = None
 ) -> Dict[str, Any]:
     try:
         if not environment:
@@ -175,12 +322,13 @@ def load_environment(
 
         # Exact match
         match = library.get(q)
+        matched_key = q if match else None
 
         # Fuzzy match
         if not match:
             for key, info in library.items():
                 if q in key or q in info.get("description", "").lower():
-                    match = info
+                    match, matched_key = info, key
                     break
 
         if not match:
@@ -189,7 +337,42 @@ def load_environment(
 
         assets_root = adapter.get_assets_root_path()
         full_path = assets_root + match["asset_path"]
-        adapter.load_environment(full_path, prim_path)
-        return {"status": "success", "message": f"Loaded environment: {match['description']}", "prim_path": prim_path}
+
+        # Load under a named child rather than onto /Environment itself. That
+        # prim also holds the stage's defaultLight, so sharing it meant the
+        # reconciliation transform below rotated the light too, and clear_scene
+        # could not remove the environment without removing the lighting.
+        target = prim_path or f"/Environment/{matched_key or 'environment'}"
+
+        # Re-loading must replace, not stack. Composing a second reference onto
+        # a prim that already carries one silently changes the geometry -- the
+        # same asset measured 10000x0x10000 on the first load and 100x100x0 on
+        # the second -- and deleting the composed children does not remove the
+        # arc that causes it.
+        # get_stage() can be None before the stage is ready — the original code
+        # never touched it, so a hard dependency here turned a working load into
+        # "'NoneType' object has no attribute 'GetPrimAtPath'". Degrade instead.
+        stage = adapter.get_stage()
+        if stage is not None:
+            existing = stage.GetPrimAtPath(target)
+            if existing and existing.IsValid():
+                try:
+                    existing.GetReferences().ClearReferences()
+                except Exception:
+                    pass
+
+        adapter.load_environment(full_path, target)
+        corrections = _reference_conversion(adapter, target, full_path)
+        bounds = _world_bounds(adapter, target)
+
+        message = f"Loaded environment: {match['description']}"
+        if corrections:
+            message += f" (axis/units {corrections.get('applied_by')}-converted)"
+        result = {"status": "success", "message": message, "prim_path": target}
+        if corrections:
+            result["corrections"] = corrections
+        if bounds:
+            result["bounds"] = bounds
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
