@@ -94,10 +94,36 @@ class MCPExtension(omni.ext.IExt):
 
     # ── Command routing ────────────────────────────────────────────────────────
 
+    def _stage_pending(self) -> bool:
+        """True while Kit has started this extension but has no stage yet.
+
+        The socket starts accepting connections roughly 8 seconds before the
+        stage exists (measured on 6.0.1: connections at t+6.8s, first successful
+        stage read at t+14.5s). An MCP client normally connects the moment the
+        port opens, so an agent's opening commands land in that window and every
+        stage-dependent handler failed with a bare
+        "'NoneType' object has no attribute 'GetPrimAtPath'" — which reads as a
+        broken server rather than one that is still starting.
+        """
+        try:
+            return self._adapter.get_stage() is None
+        except Exception:
+            # A runtime that cannot answer at all is not "pending"; let the
+            # handler run and report its own, more specific failure.
+            return False
+
     def _execute_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         cmd_type = command.get("type", "")
         params = command.get("params", {})
         handler = self._registry.get(cmd_type)
+        if handler and self._stage_pending():
+            return {
+                "status": "error",
+                "message": (
+                    "Isaac Sim is still starting up — no stage yet. This clears on its own a "
+                    "few seconds after the window appears; retry the same command."
+                ),
+            }
         if handler:
             try:
                 result = handler(**params)

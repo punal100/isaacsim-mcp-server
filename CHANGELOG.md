@@ -84,6 +84,13 @@ up at all.
   plus `get_current_frame()`). The annotator must be attached *before*
   `initialize()` and the wrapper must be cached, exactly as cameras already are.
   V5 only — 6.0's lidar path was fixed earlier and left 5.1 behind.
+- **Commands sent during startup failed with a raw AttributeError.** The socket
+  accepts connections several seconds before Kit has a stage — measured on
+  6.0.1 at t+6.8s versus t+14.5s, and an MCP client normally connects the moment
+  the port opens. Every stage-dependent tool in that window returned
+  `'NoneType' object has no attribute 'GetPrimAtPath'`, which reads as a broken
+  server rather than one still starting. Dispatch now detects the pending stage
+  and returns a message saying to retry. Both adapters.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -102,9 +109,6 @@ up at all.
   of `/Environment` — read it from the response rather than assuming it.
 
 ### Known issues
-- The first command after Isaac Sim launches can fail with
-  `No stage found. Create a stage first.` — the extension's socket opens before
-  Kit's stage exists. Calling `get_scene_info` first avoids it.
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
 - RTX camera render products are not released by `delete_object` or
