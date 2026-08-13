@@ -183,6 +183,47 @@ class IsaacAdapterBase(ABC):
         """Return physics state for a prim: rigid body, mass, velocities, contacts."""
         ...
 
+    # ── Sensor lifecycle ───────────────────────────────────
+
+    def release_sensor(self, prim_path: str) -> None:
+        """Destroy and forget any cached RTX sensor bound to this prim.
+
+        An initialized Camera/Lidar wrapper owns a render product, annotators
+        and event subscriptions, and those keep the prim alive: deleting a
+        camera reported success and the prim was still there a tick later,
+        surviving clear_scene too. Dropping the cache entry is not enough --
+        the subscriptions hold the object -- so the wrapper must be destroyed.
+        Verified on 5.1.0: destroy() then DeletePrims removes it for good.
+
+        Releasing also frees the render product, which otherwise keeps
+        rendering for the life of the Kit process.
+        """
+        for cache_name in ("_camera_sensors", "_lidar_sensors"):
+            cache = getattr(self, cache_name, None)
+            if not cache:
+                continue
+            sensor = cache.pop(prim_path, None)
+            if sensor is None:
+                continue
+            destroy = getattr(sensor, "destroy", None)
+            if callable(destroy):
+                try:
+                    destroy()
+                except Exception:
+                    # Best effort: a wrapper that cannot tear itself down must
+                    # not block the delete the caller actually asked for.
+                    pass
+        initialized = getattr(self, "_initialized_cameras", None)
+        if initialized is not None:
+            initialized.discard(prim_path)
+
+    def release_all_sensors(self) -> None:
+        """Release every cached sensor — used when clearing the whole scene."""
+        for cache_name in ("_camera_sensors", "_lidar_sensors"):
+            cache = getattr(self, cache_name, None) or {}
+            for prim_path in list(cache):
+                self.release_sensor(prim_path)
+
     # ── Sensors ────────────────────────────────────────────
 
     @abstractmethod

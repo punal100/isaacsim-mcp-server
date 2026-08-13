@@ -136,6 +136,22 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environmen
         # different matter: a loaded environment used to survive clear_scene
         # entirely, so a later create_physics_scene(floor=True) stacked a second
         # ground under the first and "clear" left a 100 m world in place.
+        # Sensors first: an initialized camera or lidar keeps its prim alive, so
+        # clearing without releasing them left every camera ever created on the
+        # stage, still rendering.
+        # Delete each sensor prim by its own path rather than relying on the
+        # root sweep below: deleting the *parent* does not release a camera the
+        # way deleting the camera path does, so a bulk clear left cameras behind
+        # for three passes while their render products kept rendering.
+        # delete_prim releases the wrapper first, which is the sequence proven
+        # to make the deletion stick.
+        try:
+            for cache_name in ("_camera_sensors", "_lidar_sensors"):
+                for sensor_path in list(getattr(adapter, cache_name, {}) or {}):
+                    adapter.delete_prim(sensor_path)
+            adapter.release_all_sensors()
+        except Exception:
+            pass
         removed_environment = _clear_environment_contents(adapter, stage) if not keep_environment else []
         # Clear all root-level prims (robots created at root, etc.)
         root_prim = stage.GetPseudoRoot()

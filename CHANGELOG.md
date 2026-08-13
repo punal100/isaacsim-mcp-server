@@ -91,6 +91,14 @@ up at all.
   `'NoneType' object has no attribute 'GetPrimAtPath'`, which reads as a broken
   server rather than one still starting. Dispatch now detects the pending stage
   and returns a message saying to retry. Both adapters.
+- **Cameras could not be deleted.** `delete_object` on a camera returned
+  success and the prim was still there a tick later, surviving `clear_scene`
+  too, because an initialized Camera wrapper owns a render product, annotators
+  and event subscriptions that keep its prim alive — dropping the cache entry is
+  not enough, the wrapper has to be destroyed. Adapters now release the sensor
+  before deleting, which also frees the render product that otherwise keeps
+  rendering for the life of the Kit process. Measured on 5.1.0: camera prims
+  1 -> 0 and render products 2 -> 1 on delete, where both previously stayed put.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -111,9 +119,11 @@ up at all.
 ### Known issues
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
-- RTX camera render products are not released by `delete_object` or
-  `clear_scene`, so each camera created adds per-frame render work for the life
-  of the Kit process (measured on 6.0.1; unverified on 5.1).
+- `clear_scene` still leaves some camera prims and their render products when
+  several cameras exist: destroying a sensor appears to need a tick before its
+  prim can go, so a batch clear removes one per pass and Kit logs
+  `SDGPipeline/Replicator_NN_Reference` attribute errors. `delete_object` on a
+  single camera is fixed; a repeated `clear_scene` eventually drains the rest.
 - `create_camera` has no look-at parameter, so aiming requires computing euler
   angles by hand.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second
