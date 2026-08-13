@@ -20,6 +20,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - create_object documents that scale= is a raw native-size multiplier. (#7)
 - stop_simulation resets the scene to spawn state. (#8)
 
+### Fixed — silent wrong answers found by live testing on 5.1.0 and 6.0.1
+
+Each of these was reproduced against a running simulator, one version at a
+time, and re-measured after the fix. Unit tests passed throughout: every one of
+them needs a real stage, a real physics step or a real referenced asset to show
+up at all.
+
+- **Joint limits were reported in degrees while positions were radians.**
+  `get_joint_config` returned USD's raw revolute limits: FR3 joint 1 read
+  `[-157.2, 157.2]` next to `actual_position=0.5`, where the real limit is
+  ±2.7437 rad. An agent clamping a target to those limits would command 25
+  revolutions. Limits now arrive in the same units as positions, with an
+  explicit `limit_units` per joint. Prismatic limits are deliberately untouched
+  — USD stores those in stage units, and converting them turns a 0.04 m gripper
+  stroke into 0.0007. `get_robot_info` previously advertised `"degrees"` for the
+  same attributes and now agrees. Both adapters. (`adapters/units.py`)
+- **A requested rotation compounded with the prim's existing orientation.**
+  `set_prim_transform` only ever wrote `xformOp:rotateXYZ`, so on a prim
+  carrying `xformOp:orient` the rotation was appended rather than replacing
+  anything, landing after `xformOp:scale`. On a prim with orient=90° and
+  scale=(1,2,1), asking for 45° produced 135° and a shear of 1.5. It already
+  bit in practice: 5.1 cameras ship `orient=(0.5,0.5,-0.5,-0.5)`, so
+  `create_camera(rotation=...)` could not aim a camera at all. Both adapters.
+  (`adapters/transforms.py`)
+- **`get_prim_info` had no rotation.** It returned position only, so "is this
+  prim rotated?" was unanswerable through the tools while the docstring
+  advertised the transform. It now reports rotation (XYZ degrees, the order
+  `transform_object` accepts) and scale, read off the orthonormalized matrix so
+  scale cannot corrupt the angle.
+- **Environments lost their axis and unit conversion.** USD authors
+  `unitsResolve` ops for a reference whose layer declares a different `upAxis`
+  or `metersPerUnit` — but only when the target prim has no pre-existing
+  children. `load_environment` referenced onto `/Environment`, which ships
+  `defaultLight`, so the conversion was skipped: a ground standing on edge,
+  10 km across, floor at z=-5000. That is 6 of 25 shipped environments on 5.1
+  and 8 of 28 on 6.0 by up-axis, 8 and 10 by units. It now references onto
+  `/Environment/<name>` and reports what USD applied under `corrections`, plus
+  `bounds` with extent and floor height. Both adapters.
+- **`clear_scene` did not clear a loaded environment**, so a later
+  `create_physics_scene(floor=True)` stacked a second ground under the first.
+  It now empties `/Environment` while always keeping `defaultLight` — an unlit
+  stage renders black, which reads as a broken sensor — and takes
+  `keep_environment` for callers who want to keep it. Reloading an environment
+  now replaces rather than stacking references.
+- **`stop_simulation` silently kept the stepped pose** when called promptly
+  after `step_simulation`. `_arm_reset_point` queues play/pause to give PhysX a
+  restore point, but timeline transitions are tick-driven, so the point landed
+  after `step()` returned. Deterministic on 6.0.1: a cube stepped from z=2.0
+  stayed at z=-3.32 through stop. Arming now pumps once so the transition lands.
+  The stepped result stays bit-identical. V6 only — V5 never had it. (#8 above
+  covers the reset itself.)
+- **`get_simulation_state` reported a Python repr as the version.** On 6.0
+  `get_version()` returns an 8-tuple, not a string, so clients saw
+  `"('6.0.1', 'rc.7', '6', ...)"` instead of `6.0.1-rc.7`. The same wrong
+  assumption made adapter selection load V5 on a 6.0 runtime; that half had been
+  fixed, this half had not. Both now read the duality from one place.
+  (`adapters/version.py`) V6 only.
+- **Both lidar tools were dead on 5.1.** `create_lidar` raised
+  `got multiple values for keyword argument 'config'` (5.1's `LidarRtx` takes
+  `config_file_name`), and `get_lidar_point_cloud` raised
+  `'LidarRtx' object has no attribute 'get_point_cloud'` (5.1 exposes annotators
+  plus `get_current_frame()`). The annotator must be attached *before*
+  `initialize()` and the wrapper must be cached, exactly as cameras already are.
+  V5 only — 6.0's lidar path was fixed earlier and left 5.1 behind.
+- **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
+  when a path did not exist. It validates both prims and names the offending
+  one. Both adapters.
+
+### Changed
+- `scripts/smoke_test_v6.py` is now `scripts/smoke_test.py` and runs against
+  either runtime, detecting the adapter from `simulation.get_state` and
+  asserting what is true for each — V5 must *not* grow the V6-only reporting
+  fields, so a misdetected adapter fails the run instead of passing quietly.
+  Several of its checks had encoded contracts the code deliberately no longer
+  has, or never had: two did `play` → `step` after that was made an error, and
+  the reset check read a top-level `position` from `get_prim_info`, which has
+  always nested it under `transform`.
+- `clear_scene` gains `keep_environment`; `load_environment` returns
+  `corrections` and `bounds`, and its `prim_path` now defaults to a named child
+  of `/Environment` — read it from the response rather than assuming it.
+
+### Known issues
+- The first command after Isaac Sim launches can fail with
+  `No stage found. Create a stage first.` — the extension's socket opens before
+  Kit's stage exists. Calling `get_scene_info` first avoids it.
+- `get_lidar_point_cloud` returns `point_count` without the points themselves on
+  6.0; the decoded cloud is discarded by the handler.
+- RTX camera render products are not released by `delete_object` or
+  `clear_scene`, so each camera created adds per-frame render work for the life
+  of the Kit process (measured on 6.0.1; unverified on 5.1).
+- `create_camera` has no look-at parameter, so aiming requires computing euler
+  angles by hand.
+- Only one Isaac Sim instance can run at a time on a single GPU; a second
+  concurrent instance caused device-lost crashes during testing.
+
 ## [0.6.0] - 2026-06-13
 
 ### Added
