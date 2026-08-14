@@ -29,8 +29,9 @@ Routes incoming socket commands to handler modules via a registry.
 from __future__ import annotations
 
 import gc
+import os
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import carb
 import omni.ext
@@ -39,6 +40,18 @@ import omni.usd
 from .adapters import get_adapter
 from .handlers import register_all_handlers
 from .socket_server import SocketServer
+
+
+def _env_int(name: str) -> Optional[int]:
+    """Read an int from the environment, ignoring unset or malformed values."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        carb.log_warn(f"Ignoring non-integer {name}={raw!r}")
+        return None
 
 
 class MCPExtension(omni.ext.IExt):
@@ -53,8 +66,19 @@ class MCPExtension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
         print("trigger  on_startup for: ", ext_id)
         self.ext_id = ext_id
-        port = self._settings.get("/exts/isaac.sim.mcp/server.port") or 8766
-        host = self._settings.get("/exts/isaac.sim.mcp/server.host") or "localhost"
+        port = (
+            self._settings.get("/exts/isaac.sim.mcp/server.port")
+            or self._settings.get("/exts/isaac.sim.mcp_extension/server.port")
+            or self._settings.get("/exts/isaac.sim.mcp_extension/server.socket")
+            or _env_int("ISAAC_MCP_PORT")
+            or 8766
+        )
+        host = (
+            self._settings.get("/exts/isaac.sim.mcp/server.host")
+            or self._settings.get("/exts/isaac.sim.mcp_extension/server.host")
+            or os.environ.get("ISAAC_MCP_HOST")
+            or "localhost"
+        )
 
         self._adapter = get_adapter()
         register_all_handlers(self._registry, self._adapter)

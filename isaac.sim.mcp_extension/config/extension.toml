@@ -26,5 +26,6 @@ name = "isaac_sim_mcp_extension"
 
 
 [settings]
+server.port = 8766
 server.socket = 8766
 server.host = "localhost"
