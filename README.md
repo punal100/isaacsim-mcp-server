@@ -3,7 +3,7 @@
 <!-- mcp-name: io.github.whats2000/isaacsim-mcp-server -->
 
 [![PyPI version](https://img.shields.io/pypi/v/isaacsim-mcp-server)](https://pypi.org/project/isaacsim-mcp-server/)
-[![Isaac Sim 5.1.0](https://img.shields.io/badge/Isaac_Sim-5.1.0-76b900)](https://developer.nvidia.com/isaac-sim)
+[![Isaac Sim 5.1.0 - 6.0.1](https://img.shields.io/badge/Isaac_Sim-5.1.0_--_6.0.1-76b900)](https://developer.nvidia.com/isaac-sim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP Quality](https://archestra.ai/mcp-catalog/api/badge/quality/whats2000/isaacsim-mcp-server)](https://archestra.ai/mcp-catalog/api/badge/quality/whats2000/isaacsim-mcp-server)
@@ -23,7 +23,7 @@ Connect any MCP-compatible IDE (Cursor, VS Code, Claude Code, Windsurf, JetBrain
 - **Step-and-observe** debugging -- step the simulation and inspect prim positions, joint states, and physics in one call
 - **Hot-reload** -- iterate on Python controllers without restarting Isaac Sim
 - **Multi-instance** -- run multiple Isaac Sim sessions side by side on different ports
-- Built for **Isaac Sim 5.1.0** with a modular adapter layer for version isolation
+- Built for **Isaac Sim 5.1.0 - 6.0.1** (PhysX + Newton) with a modular adapter layer for version isolation
 
 ---
 
@@ -49,7 +49,7 @@ cd isaacsim-mcp-server
 
 | Requirement | Version |
 |-------------|---------|
-| NVIDIA Isaac Sim | `5.1.0` |
+| NVIDIA Isaac Sim | `5.1.0` - `6.0.1` (PhysX or Newton) |
 | Python | `3.10+` |
 | `uv` | latest (for source install) |
 | Platform | Linux (Ubuntu 22.04+) |
@@ -83,9 +83,26 @@ If you installed from source:
 You should see in the logs:
 
 ```
-Registered 41 command handlers
+Registered 42 command handlers
 Isaac Sim MCP server started on localhost:8766
 ```
+
+The script looks for Isaac Sim in `$HOME/isaacsim`; set `ISAACSIM_ROOT` to use a
+different install.
+
+**Choosing the physics engine.** Isaac Sim 6.0+ ships PhysX (default) and Newton
+backends. Select one with `--newton` / `--physx`, or `ISAACSIM_ENGINE`:
+
+```bash
+./scripts/run_isaac_sim.sh                  # PhysX (default)
+./scripts/run_isaac_sim.sh --newton         # Newton
+ISAACSIM_ENGINE=newton ./scripts/run_isaac_sim.sh
+```
+
+The same flags work with `scripts/launch_isaac_sim_mcp.sh`. Everything else on
+the command line is forwarded to Kit untouched. The server auto-detects the
+active engine, so no MCP-side configuration changes. Newton requires 6.0 or
+newer; asking for it on 5.1.0 fails with a clear message.
 
 <details>
 <summary>Optional: Beaver3D / NVIDIA API keys for 3D generation</summary>
@@ -225,7 +242,7 @@ isaacsim-mcp-server          (PyPI package / CLI)
 isaac.sim.mcp_extension      (Omniverse extension)
       |
       v
-Handlers -> Adapter -> Isaac Sim 5.1.0 APIs
+Handlers -> Adapter -> Isaac Sim 5.1 / 6.0 APIs
 ```
 
 ---
@@ -399,7 +416,13 @@ Override defaults:
 ```bash
 PYTHON_SPEC=3.11 ./scripts/setup_python_env.sh
 ISAACSIM_ROOT=/opt/isaacsim ./scripts/run_isaac_sim.sh
+ISAACSIM_ENGINE=newton ./scripts/run_isaac_sim.sh
 ```
+
+Engine selection lives in `scripts/lib/isaac_launcher.sh`: each engine maps to
+the launcher script Isaac Sim ships for it. Adding an entry to that map is all a
+new backend needs — it enables both `ISAACSIM_ENGINE=<name>` and `--<name>` in
+every launcher script.
 
 <details>
 <summary>Troubleshooting</summary>

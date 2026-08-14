@@ -135,3 +135,22 @@ def test_all_handler_modules_have_register():
         tree = _parse_file(filepath)
         func_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
         assert "register" in func_names, f"{filename} missing register() function"
+
+
+def test_v6_implements_all_abstract_methods():
+    """IsaacAdapterV6 must concretely implement every @abstractmethod on the base."""
+    base_tree = _parse_file(os.path.join(EXTENSION_ROOT, "adapters", "base.py"))
+    abstract_methods = set()
+    for node in ast.walk(base_tree):
+        if isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Name) and decorator.id == "abstractmethod":
+                    abstract_methods.add(node.name)
+                elif isinstance(decorator, ast.Attribute) and decorator.attr == "abstractmethod":
+                    abstract_methods.add(node.name)
+
+    v6_tree = _parse_file(os.path.join(EXTENSION_ROOT, "adapters", "v6.py"))
+    v6_methods = {node.name for node in ast.walk(v6_tree) if isinstance(node, ast.FunctionDef)}
+
+    missing = abstract_methods - v6_methods
+    assert not missing, f"IsaacAdapterV6 is missing abstract methods: {sorted(missing)}"

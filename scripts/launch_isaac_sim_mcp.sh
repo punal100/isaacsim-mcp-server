@@ -3,7 +3,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISAACSIM_ROOT="${ISAACSIM_ROOT:-$HOME/isaacsim}"
-ISAAC_SIM_SH="$ISAACSIM_ROOT/isaac-sim.sh"
 EXTENSION_TOML="$REPO_ROOT/isaac.sim.mcp_extension/config/extension.toml"
 EXTENSION_ID="isaac.sim.mcp_extension"
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
@@ -14,10 +13,14 @@ MCP_WAIT_TIMEOUT=120   # seconds to wait for the extension socket
 
 mkdir -p "$LOG_DIR"
 
-# --- Validate paths ---
-if [[ ! -x "$ISAAC_SIM_SH" ]]; then
-  notify-send "Isaac Sim MCP" "Isaac Sim not found at: $ISAAC_SIM_SH\nSet ISAACSIM_ROOT and try again." 2>/dev/null || true
-  echo "Error: Isaac Sim launcher not found at: $ISAAC_SIM_SH" >&2
+# shellcheck source=lib/isaac_launcher.sh
+source "$REPO_ROOT/scripts/lib/isaac_launcher.sh"
+
+# --- Validate paths / pick the physics engine ---
+# Resolves ISAACSIM_ENGINE, ISAAC_SIM_SH and ISAAC_PASSTHRU_ARGS.
+# Engine: ISAACSIM_ENGINE=newton, or --newton / --engine newton on the CLI.
+if ! isaac_resolve_launcher "$ISAACSIM_ROOT" "$@"; then
+  notify-send "Isaac Sim MCP" "Could not launch Isaac Sim from: $ISAACSIM_ROOT\nSee terminal output for details." 2>/dev/null || true
   exit 1
 fi
 
@@ -68,12 +71,12 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Launch Isaac Sim in background with the chosen port ---
-echo "Launching Isaac Sim with MCP extension on port $MCP_PORT..."
+echo "Launching Isaac Sim ($ISAACSIM_ENGINE) with MCP extension on port $MCP_PORT..."
 "$ISAAC_SIM_SH" \
   --ext-folder "$REPO_ROOT" \
   --enable "$EXTENSION_ID" \
   --/exts/isaac.sim.mcp/server.port="$MCP_PORT" \
-  "$@" &
+  "${ISAAC_PASSTHRU_ARGS[@]}" &
 ISAAC_PID=$!
 echo "Isaac Sim started (PID: $ISAAC_PID)"
 

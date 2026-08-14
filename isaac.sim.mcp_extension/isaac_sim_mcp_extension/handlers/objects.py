@@ -29,6 +29,26 @@ from typing import Any, Dict, Optional, Sequence
 
 from ..adapters.base import IsaacAdapterBase
 
+# USD primitive default dimensions in meters. Used to translate the friendly
+# `size` parameter (target size in meters) into the scale factor needed to
+# produce an object of that size. Without this, naive callers get the USD
+# defaults — a 2m³ Cube, a 2m-diameter Sphere — which are surprising next
+# to a typical 1.2m-tall robot.
+_USD_DEFAULT_SIZE_M: Dict[str, float] = {
+    "Cube": 2.0,  # UsdGeom.Cube default size = 2
+    "Sphere": 2.0,  # UsdGeom.Sphere default radius = 1 → diameter 2
+    "Cylinder": 2.0,  # UsdGeom.Cylinder default height = 2
+    "Cone": 2.0,  # UsdGeom.Cone default height = 2
+    "Capsule": 2.0,  # UsdGeom.Capsule height=1 + 2*radius(0.5) = 2 end-to-end
+    "Plane": 1.0,  # UsdGeomPlane default width/length = 1
+}
+
+# Case-insensitive map from any casing to the canonical USD type name. USD type
+# names are case-sensitive, so passing "cube" to create_prim silently produces a
+# typeless prim with no geometry (no actual_size). Normalising here lets callers
+# (and agents) pass "cube"/"CUBE" and still get a real UsdGeom.Cube.
+_CANONICAL_PRIM_TYPES: Dict[str, str] = {name.lower(): name for name in _USD_DEFAULT_SIZE_M}
+
 
 def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["objects.create"] = lambda **p: create(adapter, **p)
@@ -43,16 +63,30 @@ def create(
     position: Optional[Sequence[float]] = None,
     rotation: Optional[Sequence[float]] = None,
     scale: Optional[Sequence[float]] = None,
+    size: Optional[float] = None,
     color: Optional[Sequence[float]] = None,
     physics_enabled: bool = False,
     prim_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
+        # Normalise to the canonical USD type name so non-canonical casing
+        # ("cube") still creates real geometry instead of a typeless prim.
+        object_type = _CANONICAL_PRIM_TYPES.get(object_type.lower(), object_type)
         if not prim_path:
             stage = adapter.get_stage()
             count = len(list(stage.TraverseAll()))
             prim_path = f"/World/{object_type}_{count}"
         _prim = adapter.create_prim(prim_path, prim_type=object_type)
+
+        # When no scale was given, derive one from `size` (default 1m) so the
+        # object comes out at a sane size relative to a typical robot. If the
+        # caller passed an explicit scale, that wins — `size` is ignored.
+        if scale is None:
+            target_size = size if size is not None else 1.0
+            default_dim = _USD_DEFAULT_SIZE_M.get(object_type, 2.0)
+            factor = target_size / default_dim
+            scale = [factor, factor, factor]
+
         if position or rotation or scale:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation, scale=scale)
 

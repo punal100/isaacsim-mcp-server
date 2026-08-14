@@ -62,6 +62,7 @@ class MCPExtension(omni.ext.IExt):
         self._registry: Dict[str, Any] = {}
         self._adapter = None
         self._server: SocketServer | None = None
+        self._play_sub = None
 
     def on_startup(self, ext_id: str) -> None:
         print("trigger  on_startup for: ", ext_id)
@@ -84,6 +85,26 @@ class MCPExtension(omni.ext.IExt):
         register_all_handlers(self._registry, self._adapter)
         print(f"Registered {len(self._registry)} command handlers")
 
+        # Capture logs from extension load so early diagnostics are not missed,
+        # and mark a run boundary on each timeline Play so get_isaac_logs can
+        # scope to the current run.
+        try:
+            import omni.timeline
+
+            from .handlers.simulation import _ensure_log_listener, mark_play_boundary
+
+            _ensure_log_listener()
+            self._play_sub = (
+                omni.timeline.get_timeline_interface()
+                .get_timeline_event_stream()
+                .create_subscription_to_pop_by_type(
+                    int(omni.timeline.TimelineEventType.PLAY),
+                    lambda _e: mark_play_boundary(),
+                )
+            )
+        except Exception as _e:
+            print("log listener / play-boundary setup skipped:", _e)
+
         self._server = SocketServer(host, port, self._execute_command)
         self._server.start()
 
@@ -91,15 +112,42 @@ class MCPExtension(omni.ext.IExt):
         print("trigger  on_shutdown for: ", self.ext_id)
         if self._server:
             self._server.stop()
+        self._play_sub = None
         self._registry.clear()
         gc.collect()
 
     # ── Command routing ────────────────────────────────────────────────────────
 
+    def _stage_pending(self) -> bool:
+        """True while Kit has started this extension but has no stage yet.
+
+        The socket starts accepting connections roughly 8 seconds before the
+        stage exists (measured on 6.0.1: connections at t+6.8s, first successful
+        stage read at t+14.5s). An MCP client normally connects the moment the
+        port opens, so an agent's opening commands land in that window and every
+        stage-dependent handler failed with a bare
+        "'NoneType' object has no attribute 'GetPrimAtPath'" — which reads as a
+        broken server rather than one that is still starting.
+        """
+        try:
+            return self._adapter.get_stage() is None
+        except Exception:
+            # A runtime that cannot answer at all is not "pending"; let the
+            # handler run and report its own, more specific failure.
+            return False
+
     def _execute_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         cmd_type = command.get("type", "")
         params = command.get("params", {})
         handler = self._registry.get(cmd_type)
+        if handler and self._stage_pending():
+            return {
+                "status": "error",
+                "message": (
+                    "Isaac Sim is still starting up — no stage yet. This clears on its own a "
+                    "few seconds after the window appears; retry the same command."
+                ),
+            }
         if handler:
             try:
                 result = handler(**params)

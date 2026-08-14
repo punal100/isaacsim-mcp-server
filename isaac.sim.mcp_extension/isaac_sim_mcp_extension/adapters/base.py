@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
@@ -268,6 +269,146 @@ class IsaacAdapterBase(ABC):
 
     # ── Simulation ─────────────────────────────────────────
 
+    @contextlib.contextmanager
+    def _graphs_suspended(self):
+        """Disable Action Graphs for the duration of a step, then restore them.
+
+        Stepping runs the timeline for the requested frames, which fires
+        OnPlaybackTick and evaluates every Action Graph. A ScriptNode controller
+        therefore re-commands the robot on every stepped frame and silently
+        overwrites whatever set_joint_positions just asked for — the caller sees
+        its own targets replaced by the controller's with no error anywhere.
+
+        The two debug modes are meant to stay separate: step on a frozen
+        timeline for the MCP loop, play for an Action-Graph run. Suspending the
+        graphs keeps that promise, and matches V6, whose SimulationManager.step
+        pumps only the physics pipeline.
+
+        Graphs the caller had already disabled are left alone, and everything is
+        restored even if the step raises.
+        """
+        suspended = []
+        try:
+            import omni.graph.core as og
+
+            graphs = og.get_all_graphs() if hasattr(og, "get_all_graphs") else []
+            for graph in graphs:
+                try:
+                    if not graph.is_disabled():
+                        graph.set_disabled(True)
+                        suspended.append(graph)
+                except Exception:
+                    continue
+        except Exception:
+            pass  # No OmniGraph in this runtime — nothing to suspend.
+        try:
+            yield [g.get_path_to_graph() for g in suspended] if suspended else []
+        finally:
+            for graph in suspended:
+                try:
+                    graph.set_disabled(False)
+                except Exception:
+                    pass
+
+    def _find_physics_scene(self, preferred_path: Optional[str] = None) -> Optional[str]:
+        """Path of a PhysicsScene already on the stage, preferring `preferred_path`.
+
+        Isaac Sim 6.0 ships a `/PhysicsScene` on a new stage. Adding a second one
+        at `/World/PhysicsScene` — which create_physics_scene did unconditionally
+        — leaves two scenes, and the omni.physics.tensors backend then refuses
+        state reads: get_velocities fails with "Failed to get rigid body
+        velocities from backend", which get_physics_state and step's observations
+        swallow into a plausible-looking [0, 0, 0].
+
+        Verified on 6.0.1: a body in free fall reported zero velocity with both
+        scenes present, and -1.9840 m/s immediately after the duplicate was
+        removed, with nothing else changed.
+        """
+        try:
+            stage = self.get_stage()
+            if stage is None:
+                return None
+            if preferred_path:
+                prim = stage.GetPrimAtPath(preferred_path)
+                if prim and prim.IsValid() and prim.GetTypeName() == "PhysicsScene":
+                    return preferred_path
+            for prim in stage.Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    return prim.GetPath().pathString
+        except Exception:
+            pass
+        return None
+
+    def _apply_gravity(self, scene_path: str, gravity: Sequence[float]) -> bool:
+        """Write a gravity vector onto a PhysicsScene. Returns True if applied.
+
+        USD stores gravity as a direction plus a magnitude, not as a vector, so a
+        caller-supplied [x, y, z] has to be decomposed. Both adapters used to
+        accept `gravity` and drop it: create_physics_scene only ran CreatePrim,
+        leaving the scene at its defaults (direction (0,0,0), magnitude -inf,
+        meaning "engine default"). set_physics_params reported "Physics
+        parameters updated" while changing nothing — asking for Mars gravity
+        [0, 0, -3.72] on 6.0.1 still produced a measured -4.7415 m/s after 30
+        frames, i.e. Earth.
+
+        A zero-length vector has no direction to derive, so it is treated as
+        "straight down" with zero magnitude rather than producing NaNs.
+        """
+        from pxr import Gf, UsdPhysics
+
+        prim = self.get_stage().GetPrimAtPath(scene_path)
+        if not prim or not prim.IsValid():
+            return False
+        vector = Gf.Vec3f(float(gravity[0]), float(gravity[1]), float(gravity[2]))
+        magnitude = float(vector.GetLength())
+        direction = Gf.Vec3f(vector / magnitude) if magnitude > 0 else Gf.Vec3f(0.0, 0.0, -1.0)
+        scene = UsdPhysics.Scene(prim)
+        scene.CreateGravityDirectionAttr().Set(direction)
+        scene.CreateGravityMagnitudeAttr().Set(magnitude)
+        return True
+
+    def _stage_has_physics_scene(self) -> bool:
+        """True when the stage carries at least one PhysicsScene prim."""
+        try:
+            for prim in self.get_stage().Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _resync_physics_scene_cache(self) -> None:
+        """Rebuild SimulationManager's PhysxSceneAPI cache from the live stage.
+
+        SimulationManager keys cached PhysxSceneAPI handles by prim path and
+        maintains them with add/delete callbacks. Deleting a PhysicsScene does
+        not reliably evict its entry (see the "TODO: match physics scene prim
+        path" in isaacsim.core.simulation_manager), so after clear_scene the
+        cache can map a path whose prim is valid again — because the scene was
+        re-created — onto an API bound to the deleted prim. Reading through it
+        then raises "Accessed schema on invalid prim", which breaks
+        initialize_physics() and everything that depends on it.
+
+        Re-applying the schema to the prims currently on the stage restores the
+        cache. Best effort: the cache is private, so guard every access.
+        """
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+            from pxr import PhysxSchema
+        except Exception:
+            return
+        apis = getattr(SimulationManager, "_physics_scene_apis", None)
+        if apis is None:
+            return
+        try:
+            stage = self.get_stage()
+            apis.clear()
+            for prim in stage.Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    apis[str(prim.GetPath())] = PhysxSchema.PhysxSceneAPI.Apply(prim)
+        except Exception:
+            pass
+
     def _ensure_physics_world(self) -> None:
         """Ensure a World with initialised physics exists.
 
@@ -279,8 +420,26 @@ class IsaacAdapterBase(ABC):
         """
         try:
             from isaacsim.core.api import World
+        except ImportError:
+            return  # Non-v5 runtimes may not have isaacsim.core.api
 
-            world = World.instance()
+        # Initialising physics before the stage has a PhysicsScene builds a
+        # simulation view with no articulation data, and adding a scene later
+        # does NOT rebuild it. Every subsequent SingleArticulation.initialize()
+        # then fails with "'NoneType' object has no attribute 'link_names'", so
+        # create_robot silently returns without joint_names / num_dof / warnings
+        # and the process cannot recover — verified on 5.1, where even deleting
+        # the scene and rebuilding World did not restore it.
+        #
+        # Any tool can warm physics (execute_script, step, play), so the damage
+        # depends purely on call order. There is nothing meaningful to
+        # initialise without a scene, so do nothing and let create_physics_scene
+        # (or the caller) establish one first.
+        if not self._stage_has_physics_scene():
+            return
+
+        def _prepare(world):
+            """Build the World if absent and make sure physics is initialised."""
             if world is None:
                 world = World(
                     physics_dt=1.0 / 60.0,
@@ -289,8 +448,35 @@ class IsaacAdapterBase(ABC):
                 )
             if world.physics_sim_view is None:
                 world.initialize_physics()
-        except ImportError:
-            pass  # Non-v5 runtimes may not have isaacsim.core.api
+            return world
+
+        try:
+            _prepare(World.instance())
+        except Exception:
+            # The cached World outlives the prims it was built against, so after
+            # clear_scene (or any prim deletion) it dereferences dead handles and
+            # raises "Accessed schema on invalid prim". Note the raise can come
+            # from merely reading physics_sim_view, not just from
+            # initialize_physics(), so the whole preparation is guarded.
+            #
+            # Untreated this wedges every tool routed through here — play, step,
+            # execute_script, reload_script, get_joint_config,
+            # create_action_graph — until Kit is restarted. Drop the stale
+            # singleton and rebuild against the live stage.
+            self._resync_physics_scene_cache()
+            try:
+                World.clear_instance()
+            except Exception:
+                pass
+            try:
+                _prepare(None)
+            except Exception as exc:
+                # Still best effort: this helper only pre-warms physics. Raising
+                # here would take down every tool that calls it, so report and
+                # continue — whatever actually needs physics will fail with its
+                # own specific error instead of a blanket wedge. The message
+                # reaches kit's log, which get_isaac_logs surfaces.
+                print(f"_ensure_physics_world: could not initialise physics ({exc}); continuing without it")
 
     @abstractmethod
     def play(self) -> None:

@@ -56,7 +56,11 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
     @mcp.tool("stop_simulation")
     def stop_simulation() -> str:
-        """Stop the physics simulation."""
+        """Stop the physics simulation and reset to spawn state.
+
+        Resets articulations and rigid bodies to their spawn pose (the state
+        captured at first Play), like the Isaac UI Stop button. Call this to
+        return the scene to a clean starting point before another run."""
         try:
             conn = get_connection()
             result = conn.send_command("simulation.stop")
@@ -68,13 +72,19 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def step_simulation(
         num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
     ) -> str:
-        """Step the simulation forward by N frames, then observe prim and joint states.
+        """Advance the simulation by exactly N physics frames on a FROZEN timeline.
 
-        This is the primary tool for debugging robot behavior. Use it instead of
-        play_simulation + sleep + execute_script. The observe parameters let you
-        inspect positions, velocities, and joint states in a single call.
+        step is self-contained: it initialises physics on first call and operates
+        on a paused/stopped timeline, so N is always exact and observations
+        correlate to a known frame count.
 
-        Typical debug loop:
+        Do NOT call play_simulation before or during the debug loop; step is for
+        a frozen timeline. If the timeline is already playing, step returns an
+        error (a free run cannot be counted frame-by-frame). Use play_simulation
+        ONLY for a final continuous run / ScriptNode-driven demo, never for
+        debugging.
+
+        Typical debug loop (no play):
           1. set_joint_positions to command the robot
           2. step_simulation with observe_prims and observe_joints
           3. get_joint_config if drives are not tracking correctly
@@ -124,29 +134,38 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("get_isaac_logs")
-    def get_isaac_logs(clear: bool = True, count: int = 100) -> str:
-        """Diagnostic tool: get recent warnings and errors from the Isaac Sim console.
+    def get_isaac_logs(clear: bool = False, count: int = 100, since_last_play: bool = True) -> str:
+        """Diagnostic tool: recent WARN/ERROR logs plus captured print() output.
 
-        Call this after any tool returns an error, after simulation behavior is unexpected,
-        or after execute_script / reload_script fails. Helps diagnose physics warnings,
-        collision issues, and script errors that are not surfaced in tool responses.
+        Captures carb.log_*/omni.log WARN+ERROR and stdout from execute_script /
+        reload_script (tagged [PRINT]). Plain print() outside those captured
+        contexts may not appear.
+
+        Defaults are agent-friendly: non-destructive (clear=False) and scoped to
+        the current run (since_last_play=True) so you see logs from what you just
+        did, not stale entries from previous runs.
 
         Args:
-            clear: Clear the log buffer after reading. Default True.
+            clear: If True, empty the buffer after reading. Default False.
             count: Maximum number of log entries to return.
+            since_last_play: If True (default), return only entries since the last
+                timeline Play. Set False for the full buffer.
         """
         try:
             conn = get_connection()
-            result = conn.send_command("simulation.get_logs", {"clear": clear, "count": count})
+            result = conn.send_command(
+                "simulation.get_logs",
+                {"clear": clear, "count": count, "since_last_play": since_last_play},
+            )
             return json.dumps(result, indent=2)
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("get_simulation_state")
     def get_simulation_state() -> str:
-        """Get the current simulation state including timeline status (playing/stopped/paused),
-        simulation time, and physics dt. Call this to verify the simulation is running before
-        using step_simulation."""
+        """Get the current simulation state: timeline status (playing/stopped/paused),
+        simulation time, and physics dt. step_simulation does NOT require a running
+        timeline — do not play just to step."""
         try:
             conn = get_connection()
             result = conn.send_command("simulation.get_state")
@@ -159,6 +178,9 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         """Diagnostic tool: get physics state for a prim.
 
         Returns rigid body status, mass, velocities, kinematic flag, and collision info.
+        Velocity units: linear_velocity in m/s, angular_velocity in rad/s.
+        Velocities are only non-zero once the simulation has advanced — step the
+        simulation (or play) before reading them.
         Call this when:
         - Objects fall through the ground (check collision enabled)
         - Objects don't move when expected (check is_kinematic, mass)
@@ -206,6 +228,13 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         USE this for: operations no named tool covers, such as creating Action Graphs,
         computing IK, setting up physics callbacks, or configuring advanced USD properties.
 
+        CAUTION: touching an articulation controlled by a running ScriptNode /
+        Action Graph can silently break its control path (no error is raised).
+        While a graph is running, read-only diagnostics (get_prim_info,
+        get_physics_state, get_joint_positions, get_isaac_logs) are safe, but
+        stop_simulation before using execute_script or named write tools on the
+        same articulation.
+
         For persistent controllers (>20 lines), write a .py file and load it with
         reload_script instead of pasting code here.
 
@@ -225,13 +254,20 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
     @mcp.tool("reload_script")
     def reload_script(file_path: str, module_name: Optional[str] = None) -> str:
-        """Load a Python controller or module into Isaac Sim from a file on disk.
+        """Reload a Python controller from a file on disk.
 
-        Use this instead of execute_script for persistent controllers, state machines,
-        or any code longer than ~20 lines. Workflow:
-          1. Write the controller as a .py file
-          2. reload_script to load it into Isaac Sim
-          3. step_simulation to debug the behavior
+        Two modes, chosen automatically:
+        - If any Action-Graph ScriptNode references this file (inputs:scriptPath),
+          those ScriptNodes are force-recompiled so your on-disk edits take effect
+          on the running graph. This is how you iterate on a ScriptNode controller.
+        - Otherwise the file is (re-)executed as a standalone controller, the way
+          you would use execute_script for code longer than ~20 lines.
+
+        Workflow:
+          1. Write the controller as a .py file (attach via create_action_graph
+             script_file=... for ScriptNode use)
+          2. reload_script to load / recompile it
+          3. step_simulation to debug (frozen timeline) or play for a ScriptNode demo
           4. Edit the file and reload_script again to iterate
 
         The file's directory is auto-added to sys.path.

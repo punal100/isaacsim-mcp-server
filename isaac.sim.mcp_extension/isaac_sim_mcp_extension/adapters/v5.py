@@ -31,13 +31,64 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .base import IsaacAdapterBase
+from .transforms import read_transform, set_transform
+from .units import limit_units, normalize_limit
 
 if TYPE_CHECKING:
     from pxr import Usd
 
 
+def _recompile_scriptnodes_for_file(abs_path: str) -> list:
+    """Recompile every Action-Graph ScriptNode whose scriptPath matches abs_path.
+
+    Returns the list of recompiled node paths (empty if none matched).
+    """
+    import os
+
+    try:
+        import omni.graph.core as og
+
+        from ..handlers.graphs import force_recompile_scriptnode
+    except Exception:
+        return []
+
+    recompiled = []
+    try:
+        graphs = og.get_all_graphs() if hasattr(og, "get_all_graphs") else []
+    except Exception:
+        graphs = []
+    for graph in graphs:
+        try:
+            for node in graph.get_nodes():
+                attr = node.get_attribute("inputs:scriptPath")
+                if attr is None or not attr.is_valid():
+                    continue
+                val = attr.get()
+                if val and os.path.abspath(str(val)) == abs_path:
+                    force_recompile_scriptnode(graph, node)
+                    recompiled.append(node.get_prim_path())
+        except Exception:
+            continue
+    return recompiled
+
+
 class IsaacAdapterV5(IsaacAdapterBase):
     """Adapter for Isaac Sim 5.1.0 (isaacsim.* namespace)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Long-lived Camera wrappers keyed by prim_path, and the subset that has
+        # been initialized. A Camera only fills its buffer on render ticks after
+        # initialize(), so a wrapper rebuilt per call can never return a frame —
+        # and initialize() must run exactly once per camera, since each call
+        # creates a render product, attaches annotators and registers three
+        # event subscriptions. See capture_camera_image.
+        self._camera_sensors: Dict[str, Any] = {}
+        self._initialized_cameras: set = set()
+        # Lidars need the same treatment as cameras, and for the same reason:
+        # the annotator must be attached before initialize() and survives only
+        # as long as the wrapper does. See get_lidar_point_cloud.
+        self._lidar_sensors: Dict[str, Any] = {}
 
     # ── Scene ──────────────────────────────────────────────
 
@@ -79,12 +130,20 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 continue
             for entry in entries:
                 name = entry.relative_path.rstrip("/")
+                # Skip hidden directories. Every asset folder keeps a ".thumbs"
+                # of "<name>.thumb.usd" previews, which otherwise registered as
+                # environments named e.g. "grid_.thumbs" pointing at a
+                # thumbnail: 8 of the 36 entries returned on 6.0.1 were these.
+                if name.lstrip("/").startswith("."):
+                    continue
                 dir_path = root + base + name + "/"
                 r2, files = omni.client.list(dir_path)
                 if r2 != omni.client.Result.OK:
                     continue
                 # Find USD files at this level
                 for f in files:
+                    if f.relative_path.endswith(".thumb.usd"):
+                        continue  # preview image, not an environment
                     if f.relative_path.endswith(".usd") or f.relative_path.endswith(".usda"):
                         key = name.lower().replace(" ", "_")
                         if key not in discovered:
@@ -96,10 +155,14 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 # Also check one level deeper for nested envs
                 for f in files:
                     subname = f.relative_path.rstrip("/")
+                    if subname.lstrip("/").startswith("."):
+                        continue
                     r3, subfiles = omni.client.list(dir_path + subname + "/")
                     if r3 != omni.client.Result.OK:
                         continue
                     for sf in subfiles:
+                        if sf.relative_path.endswith(".thumb.usd"):
+                            continue
                         if sf.relative_path.endswith(".usd") or sf.relative_path.endswith(".usda"):
                             key = f"{name}_{subname}".lower().replace(" ", "_")
                             if key not in discovered:
@@ -127,20 +190,17 @@ class IsaacAdapterV5(IsaacAdapterBase):
         rotation: Optional[Sequence[float]] = None,
         scale: Optional[Sequence[float]] = None,
     ) -> None:
-        from pxr import Gf, UsdGeom
+        from pxr import UsdGeom
 
         stage = self.get_stage()
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
         xformable = UsdGeom.Xformable(prim)
-        xformable.ClearXformOpOrder()
-        if position is not None:
-            xformable.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*position))
-        if rotation is not None:
-            xformable.AddRotateXYZOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*rotation))
-        if scale is not None:
-            xformable.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*scale))
+        # Which op holds the rotation, and where it sits relative to scale,
+        # decides whether a requested rotation replaces or compounds. See
+        # adapters/transforms.py.
+        set_transform(xformable, position=position, rotation=rotation, scale=scale)
 
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
         from pxr import UsdGeom
@@ -149,12 +209,7 @@ class IsaacAdapterV5(IsaacAdapterBase):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
-        xformable = UsdGeom.Xformable(prim)
-        local_transform = xformable.GetLocalTransformation()
-        translation = local_transform.ExtractTranslation()
-        return {
-            "position": [translation[0], translation[1], translation[2]],
-        }
+        return read_transform(UsdGeom.Xformable(prim))
 
     def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
         stage = self.get_stage()
@@ -289,43 +344,76 @@ class IsaacAdapterV5(IsaacAdapterBase):
         if result != omni.client.Result.OK:
             return discovered
 
-        for mfr_entry in manufacturers:
-            mfr_name = mfr_entry.relative_path.rstrip("/")
-            mfr_path = robots_base + mfr_name + "/"
+        # The walk is ~150 directory listings deep in three levels. Run each
+        # level concurrently: the calls are network round-trips against the
+        # asset server, so they are latency bound, not CPU bound, and doing them
+        # one at a time costs ~28 s on a cold omni.client cache — during which
+        # kit's main loop is blocked and the whole app is frozen. Ordering is
+        # preserved by mapping over the input list, so the key-preference rules
+        # below behave exactly as they did sequentially.
+        def _list_dir(path: str):
+            try:
+                res, entries = omni.client.list(path)
+                return entries if res == omni.client.Result.OK else []
+            except Exception:
+                return []
 
-            result2, models = omni.client.list(mfr_path)
-            if result2 != omni.client.Result.OK:
-                continue
+        def _map(paths):
+            if len(paths) < 2:
+                return [_list_dir(p) for p in paths]
+            try:
+                from concurrent.futures import ThreadPoolExecutor
 
-            for model_entry in models:
-                model_name = model_entry.relative_path.rstrip("/")
-                model_path = mfr_path + model_name + "/"
+                with ThreadPoolExecutor(max_workers=min(16, len(paths))) as pool:
+                    return list(pool.map(_list_dir, paths))
+            except Exception:
+                # Any threading problem: fall back to the sequential walk.
+                return [_list_dir(p) for p in paths]
 
-                # Look for USD files directly in the model directory
-                result3, files = omni.client.list(model_path)
-                if result3 != omni.client.Result.OK:
+        mfr_names = [m.relative_path.rstrip("/") for m in manufacturers]
+        mfr_models = _map([robots_base + n + "/" for n in mfr_names])
+
+        # Flatten to (manufacturer, model) pairs, then list every model dir at once.
+        # Skip hidden directories: every manufacturer keeps a ".thumbs" folder of
+        # "<model>.thumb.usd" preview files, which otherwise register as a robot
+        # named ".thumbs" pointing at a thumbnail.
+        pairs = [
+            (mfr_name, model_entry.relative_path.rstrip("/"))
+            for mfr_name, models in zip(mfr_names, mfr_models)
+            for model_entry in models
+            if not model_entry.relative_path.lstrip("/").startswith(".")
+        ]
+        model_files = _map([f"{robots_base}{mfr}/{model}/" for mfr, model in pairs])
+
+        for (mfr_name, model_name), files in zip(pairs, model_files):
+            for file_entry in files:
+                fname = file_entry.relative_path
+                if not (fname.endswith(".usd") or fname.endswith(".usda")):
                     continue
+                if fname.endswith(".thumb.usd"):
+                    continue  # preview image, not a robot
+                asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
 
-                for file_entry in files:
-                    fname = file_entry.relative_path
-                    if not (fname.endswith(".usd") or fname.endswith(".usda")):
-                        continue
-                    # Skip variants with suffixes like _physx_lidar, _with_arm
-                    _base_name = fname.rsplit(".", 1)[0]
-                    asset_rel = f"/Isaac/Robots/{mfr_name}/{model_name}/{fname}"
-
-                    # Use lowercase model name as key, prefer shorter/simpler names
-                    key = model_name.lower().replace(" ", "_")
-                    if key in discovered:
-                        # Keep the simpler filename (shorter name wins)
-                        if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
-                            discovered[key]["asset_path"] = asset_rel
-                    else:
+                # Use lowercase model name as key, prefer shorter/simpler names
+                key = model_name.lower().replace(" ", "_")
+                if key in discovered:
+                    # Keep the simpler filename (shorter name wins). Rewrite the
+                    # whole record, not just the path: two manufacturers can ship
+                    # the same model directory name, and updating the path alone
+                    # left entries describing one vendor while pointing at
+                    # another's asset.
+                    if len(fname) < len(discovered[key]["asset_path"].split("/")[-1]):
                         discovered[key] = {
                             "asset_path": asset_rel,
                             "description": f"{mfr_name} {model_name}",
                             "manufacturer": mfr_name,
                         }
+                else:
+                    discovered[key] = {
+                        "asset_path": asset_rel,
+                        "description": f"{mfr_name} {model_name}",
+                        "manufacturer": mfr_name,
+                    }
 
         return discovered
 
@@ -374,18 +462,18 @@ class IsaacAdapterV5(IsaacAdapterBase):
                     lo = rev.GetLowerLimitAttr().Get()
                     hi = rev.GetUpperLimitAttr().Get()
                     limit_entry["type"] = "revolute"
-                    limit_entry["lower"] = float(lo) if lo is not None else None
-                    limit_entry["upper"] = float(hi) if hi is not None else None
-                    limit_entry["units"] = "degrees"
+                    limit_entry["lower"] = normalize_limit(lo, "revolute")
+                    limit_entry["upper"] = normalize_limit(hi, "revolute")
+                    limit_entry["units"] = limit_units("revolute")
                     break
                 if desc.IsA(UsdPhysics.PrismaticJoint):
                     pris = UsdPhysics.PrismaticJoint(desc)
                     lo = pris.GetLowerLimitAttr().Get()
                     hi = pris.GetUpperLimitAttr().Get()
                     limit_entry["type"] = "prismatic"
-                    limit_entry["lower"] = float(lo) if lo is not None else None
-                    limit_entry["upper"] = float(hi) if hi is not None else None
-                    limit_entry["units"] = "meters"
+                    limit_entry["lower"] = normalize_limit(lo, "prismatic")
+                    limit_entry["upper"] = normalize_limit(hi, "prismatic")
+                    limit_entry["units"] = limit_units("prismatic")
                     break
             joint_limits.append(limit_entry)
 
@@ -569,8 +657,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
                     lower_attr = joint_api.GetLowerLimitAttr()
                     upper_attr = joint_api.GetUpperLimitAttr()
 
-                joint_data["lower_limit"] = lower_attr.Get() if lower_attr else None
-                joint_data["upper_limit"] = upper_attr.Get() if upper_attr else None
+                # USD keeps revolute limits in degrees; positions below are in
+                # radians. See adapters/units.py.
+                joint_type = joint_data["type"]
+                joint_data["lower_limit"] = normalize_limit(lower_attr.Get() if lower_attr else None, joint_type)
+                joint_data["upper_limit"] = normalize_limit(upper_attr.Get() if upper_attr else None, joint_type)
+                joint_data["limit_units"] = limit_units(joint_type)
 
                 # Get drive config
                 for drive_type in ["angular", "linear"]:
@@ -639,7 +731,17 @@ class IsaacAdapterV5(IsaacAdapterBase):
         import omni.kit.commands
 
         scene_path = f"/World/{scene_name}"
-        omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+        # Reuse a scene that already exists rather than adding a second one:
+        # two PhysicsScenes break physics state reads. See _find_physics_scene.
+        existing = self._find_physics_scene(preferred_path=scene_path)
+        if existing is not None:
+            scene_path = existing
+        else:
+            omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+        if gravity is not None:
+            # Without this the argument was accepted and discarded — see
+            # _apply_gravity.
+            self._apply_gravity(scene_path, gravity)
         return scene_path
 
     def get_physics_state(self, prim_path: str) -> Dict[str, Any]:
@@ -672,24 +774,50 @@ class IsaacAdapterV5(IsaacAdapterBase):
         has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
         result["collision_enabled"] = has_collision
 
-        # Get velocities from PhysX runtime API (not USD attributes which may be stale)
+        # Velocities come from the physics:* attributes, which PhysX writes back
+        # every simulated frame.
+        #
+        # This used to read omni.physx get_rigidbody_transformation(), but that
+        # call only returns {position, rotation, ret_val} — there is no velocity
+        # in the payload, so `.get("linear_velocity", (0, 0, 0))` silently
+        # returned zeros on every call and a moving body was indistinguishable
+        # from one at rest. Verified against a cube falling at 15 m/s: the physx
+        # call had no velocity key while physics:velocity read [0, 0, -15.042].
+        #
+        # Units: physics:velocity is m/s. physics:angularVelocity is deg/s in USD,
+        # converted to rad/s here so angular values match the radians this API
+        # uses everywhere else (joint positions, limits).
         if has_rb:
+            result["linear_velocity"] = [0.0, 0.0, 0.0]
+            result["angular_velocity"] = [0.0, 0.0, 0.0]
             try:
-                import omni.physx
-
-                physx = omni.physx.get_physx_interface()
-                rb_data = physx.get_rigidbody_transformation(prim_path)
-                if rb_data and rb_data.get("ret_val", False):
-                    vel = rb_data.get("linear_velocity", (0.0, 0.0, 0.0))
-                    ang_vel = rb_data.get("angular_velocity", (0.0, 0.0, 0.0))
-                    result["linear_velocity"] = [float(vel[0]), float(vel[1]), float(vel[2])]
-                    result["angular_velocity"] = [float(ang_vel[0]), float(ang_vel[1]), float(ang_vel[2])]
-                else:
-                    result["linear_velocity"] = [0.0, 0.0, 0.0]
-                    result["angular_velocity"] = [0.0, 0.0, 0.0]
+                lin = prim.GetAttribute("physics:velocity")
+                if lin and lin.Get() is not None:
+                    result["linear_velocity"] = [float(v) for v in lin.Get()]
+                ang = prim.GetAttribute("physics:angularVelocity")
+                if ang and ang.Get() is not None:
+                    result["angular_velocity"] = [float(np.radians(v)) for v in ang.Get()]
             except Exception:
-                result["linear_velocity"] = [0.0, 0.0, 0.0]
-                result["angular_velocity"] = [0.0, 0.0, 0.0]
+                pass
+            # PhysX only writes these attributes back while /physics/updateToUsd
+            # and /physics/updateVelocitiesToUsd are enabled (both default on).
+            # If either is off, the reads above stay at zero — say so rather than
+            # reporting a moving body as stationary, which is the silent failure
+            # this code path used to have.
+            try:
+                import carb
+
+                settings = carb.settings.get_settings()
+                if settings.get("/physics/updateToUsd") is False or (
+                    settings.get("/physics/updateVelocitiesToUsd") is False
+                ):
+                    result["velocity_warning"] = (
+                        "physics USD write-back is disabled (/physics/updateToUsd or "
+                        "/physics/updateVelocitiesToUsd is false), so velocities read as zero "
+                        "regardless of actual motion."
+                    )
+            except Exception:
+                pass
 
         # Get contact info if available
         try:
@@ -705,24 +833,102 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def create_camera(self, prim_path: str, resolution: Tuple[int, int] = (1280, 720), **kwargs) -> Any:
         from isaacsim.sensors.camera import Camera
 
-        return Camera(prim_path=prim_path, resolution=resolution, **kwargs)
+        camera = Camera(prim_path=prim_path, resolution=resolution, **kwargs)
+        # Keep the wrapper so capture_camera_image reads this camera — created
+        # with the caller's resolution — instead of building a throwaway one.
+        self._camera_sensors[prim_path] = camera
+        self._initialized_cameras.discard(prim_path)
+        return camera
 
     def capture_camera_image(self, prim_path: str) -> np.ndarray:
+        """Return the latest RGBA frame, or an empty array if none has rendered.
+
+        This used to build `Camera(prim_path=prim_path)` on every call and read
+        get_rgba() immediately, which could never return an image:
+
+          * A Camera only fills its buffer on render ticks *after* initialize(),
+            and this never called it.
+          * A wrapper created inside the call has had no tick to render into, so
+            its first read is always empty — and the next call discarded it and
+            started over.
+          * Rebuilding without the resolution also dropped the one requested at
+            create_camera, so captures came back at the 128x128 Camera default.
+
+        Verified on Isaac Sim 5.1.0: capture returned an empty array on every
+        call with the timeline stopped *and* playing, while a wrapper kept alive
+        and initialized returned a real (128, 128, 4) frame on the next call.
+
+        initialize() runs at most once per camera. Calling it per capture — the
+        first version of this fix — left kit alive but unresponsive: the
+        integration suite went from 7s to not finishing in 240s. Each call
+        creates a render product, attaches annotators and registers three event
+        subscriptions, so repeating it per request accumulates work the renderer
+        then carries every frame.
+        """
         from isaacsim.sensors.camera import Camera
 
-        cam = Camera(prim_path=prim_path)
-        return cam.get_rgba()
+        camera = self._camera_sensors.get(prim_path)
+        if camera is None:
+            camera = Camera(prim_path=prim_path)
+            self._camera_sensors[prim_path] = camera
+        if prim_path not in self._initialized_cameras:
+            try:
+                camera.initialize()
+            except Exception:
+                # A camera whose render product is not ready yet reads as
+                # "no frame", not as a failed capture.
+                pass
+            self._initialized_cameras.add(prim_path)
+        data = camera.get_rgba()
+        if data is None:
+            return np.zeros((0,), dtype=np.uint8)
+        return data
+
+    # 5.1 exposes the decoded point cloud through this annotator; 6.0 replaced
+    # it with a packed generic-model-output buffer (see v6.get_lidar_point_cloud).
+    LIDAR_POINT_CLOUD_ANNOTATOR = "IsaacExtractRTXSensorPointCloudNoAccumulator"
+
+    def _lidar_sensor(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
+        """Return a cached LidarRtx with its point-cloud annotator live.
+
+        The annotator must be attached *before* initialize(): calling
+        initialize() first leaves the sensor with zero annotators and every
+        frame empty, measured on 5.1.0.
+        """
+        from isaacsim.sensors.rtx import LidarRtx
+
+        sensor = self._lidar_sensors.get(prim_path)
+        if sensor is None:
+            # 5.1's LidarRtx takes config_file_name; passing `config` lands in
+            # **kwargs and collides with the kit command's own argument, raising
+            # "got multiple values for keyword argument 'config'".
+            sensor = LidarRtx(prim_path=prim_path, config_file_name=config or "Example_Rotary", **kwargs)
+            sensor.attach_annotator(self.LIDAR_POINT_CLOUD_ANNOTATOR)
+            sensor.initialize()
+            self._lidar_sensors[prim_path] = sensor
+        return sensor
 
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
-        from isaacsim.sensors.rtx import LidarRtx
-
-        return LidarRtx(prim_path=prim_path, config=config or "Example_Rotary", **kwargs)
+        return self._lidar_sensor(prim_path, config=config, **kwargs)
 
     def get_lidar_point_cloud(self, prim_path: str) -> np.ndarray:
-        from isaacsim.sensors.rtx import LidarRtx
-
-        lidar = LidarRtx(prim_path=prim_path)
-        return lidar.get_point_cloud()
+        # LidarRtx has no get_point_cloud() on 5.1 — the old call raised
+        # "'LidarRtx' object has no attribute 'get_point_cloud'" on every read.
+        # Rebuilding the wrapper per call was equally fatal: a fresh one carries
+        # no annotator, so it could never return a frame.
+        sensor = self._lidar_sensor(prim_path)
+        frame = sensor.get_current_frame() or {}
+        payload = frame.get(self.LIDAR_POINT_CLOUD_ANNOTATOR)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if data is None:
+            return np.zeros((0, 3), dtype=np.float32)
+        points = np.asarray(data)
+        # This annotator only yields on frames where a sweep completes, so an
+        # empty read is "not this frame", not "the lidar saw nothing" — the
+        # handler turns it into a retry message.
+        if points.size == 0 or points.ndim != 2 or points.shape[1] != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        return points.astype(np.float32)
 
     # ── Materials ──────────────────────────────────────────
 
@@ -863,17 +1069,55 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def stop(self) -> None:
         import omni.timeline
 
+        # timeline.stop() already restores rigid bodies / articulations to their
+        # spawn pose — it is what the Isaac UI Stop button does. Verified on 5.1:
+        # a cube dropped from z=2 to z=0.1 returns to exactly z=2 after this call.
+        #
+        # Do NOT add World.reset() here. It re-starts the timeline (verified:
+        # stop_simulation then reported "playing" with the time advancing), and
+        # the restart lands on a later frame, so stopping again immediately does
+        # not help. A stop that leaves the sim running makes step_simulation
+        # refuse to run and breaks the step-only debug loop.
         omni.timeline.get_timeline_interface().stop()
 
     def step(
         self, num_steps: int = 1, observe_prims: Optional[List[str]] = None, observe_joints: Optional[List[str]] = None
     ) -> Dict[str, Any]:
+        # Advance physics by exactly num_steps frames on a frozen timeline, then
+        # freeze again, so the caller can inspect the result — the V6 contract,
+        # where SimulationManager.step(steps=N) does this natively.
+        #
+        # Pumping omni.kit.app.update() alone (the old behaviour) does NOT
+        # advance physics while the timeline is stopped: a cube left at z=2 was
+        # still at z=2 with zero velocity after 70 "steps", so every observation
+        # came back identical and the step-only debug loop could never simulate
+        # anything. Physics only ticks while the timeline runs, so run it for the
+        # requested frames and pause immediately afterwards.
         import omni.kit.app
+        import omni.timeline
 
-        for _ in range(num_steps):
-            omni.kit.app.get_app().update()
+        self._ensure_physics_world()
+        timeline = omni.timeline.get_timeline_interface()
+        resume_paused = not timeline.is_playing()
+        # Running the timeline also evaluates Action Graphs, so a ScriptNode
+        # controller would re-command the robot on every stepped frame and
+        # silently discard the caller's set_joint_positions. Suspend graphs for
+        # the duration; play is the mode for driving them.
+        with self._graphs_suspended() as suspended:
+            if resume_paused:
+                timeline.play()
+            try:
+                for _ in range(num_steps):
+                    omni.kit.app.get_app().update()
+            finally:
+                if resume_paused:
+                    # Pause (not stop): stop would reset everything to the spawn
+                    # pose and discard exactly the physics result being measured.
+                    timeline.pause()
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if suspended:
+            result["graphs_suspended"] = [str(p) for p in suspended]
 
         # Observe prim states
         if observe_prims:
@@ -952,8 +1196,15 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
         stage = self.get_stage()
         physics_dt = 1.0 / 60.0  # default
-        for prim in stage.Traverse():
-            if prim.HasAPI(UsdPhysics.Scene):
+        # Kit accepts MCP commands before it has created a stage — measured on
+        # 6.0.1 the socket opens 2.86s ahead of it, and 5.1.0 behaves the same.
+        # Traversing None there raised "'NoneType' object has no attribute
+        # 'Traverse'", turning a routine status query into an opaque error during
+        # startup. The timeline state is still knowable, so report that and fall
+        # back to the default physics_dt.
+        prims = stage.Traverse() if stage is not None else []
+        for prim in prims:
+            if prim.IsA(UsdPhysics.Scene):
                 time_step_attr = prim.GetAttribute("physxScene:timeStepsPerSecond")
                 if time_step_attr and time_step_attr.Get():
                     steps_per_sec = time_step_attr.Get()
@@ -988,18 +1239,36 @@ class IsaacAdapterV5(IsaacAdapterBase):
         try:
             self._ensure_physics_world()
             exec(code, local_ns)
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "success",
                 "message": "Script executed successfully",
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         except Exception as e:
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "error",
                 "message": str(e),
                 "traceback": traceback.format_exc(),
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         finally:
@@ -1021,6 +1290,18 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
         # Clean up previous exec() namespace for this file (unsubscribe orphaned callbacks)
         abs_path = os.path.abspath(file_path)
+
+        # ScriptNode-aware reload: if any Action-Graph ScriptNode references this
+        # file via inputs:scriptPath, force it to recompile (the standalone
+        # re-exec below would not touch the running graph node).
+        recompiled = _recompile_scriptnodes_for_file(abs_path)
+        if recompiled:
+            return {
+                "status": "success",
+                "message": f"Recompiled ScriptNode(s) referencing {os.path.basename(file_path)}",
+                "recompiled_nodes": recompiled,
+            }
+
         old_ns = self._exec_namespaces.get(abs_path)
         if old_ns:
             for key, val in old_ns.items():
@@ -1068,18 +1349,36 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 self._exec_namespaces[abs_path] = local_ns
                 msg = f"Script '{os.path.basename(file_path)}' executed successfully"
 
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "success",
                 "message": msg,
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         except Exception as e:
+            out = captured_out.getvalue()
+            if out.strip():
+                try:
+                    from ..handlers.simulation import append_log
+
+                    for line in out.splitlines():
+                        append_log(f"[PRINT] {line}")
+                except Exception:
+                    pass
             return {
                 "status": "error",
                 "message": str(e),
                 "traceback": traceback.format_exc(),
-                "stdout": captured_out.getvalue(),
+                "stdout": out,
                 "stderr": captured_err.getvalue(),
             }
         finally:

@@ -25,9 +25,8 @@
 
 from __future__ import annotations
 
+import traceback
 from typing import Any, Dict, List, Optional, Sequence
-
-import numpy as np
 
 from ..adapters.base import IsaacAdapterBase
 
@@ -148,8 +147,10 @@ def create(
             prim_path = f"/{prim_name}"
         adapter.add_reference_to_stage(asset_path, prim_path)
         if position:
-            xform = adapter.create_xform_prim(prim_path)
-            xform.set_world_pose(position=np.array(position))
+            # set_prim_transform works on both V5 (omni.isaac.core XFormPrim)
+            # and V6 (experimental Articulation) — the experimental XformPrim
+            # only exposes the batched set_world_poses(), not the singular form.
+            adapter.set_prim_transform(prim_path, position=position)
         result = {
             "status": "success",
             "message": f"Created {match['description']} robot",
@@ -160,16 +161,18 @@ def create(
             info = adapter.get_robot_joint_info(prim_path)
             result["joint_names"] = info.get("joint_names", [])
             result["num_dof"] = info.get("num_dof", 0)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"create_robot: get_robot_joint_info failed for {prim_path}: {e}")
+            traceback.print_exc()
         # Check for broken drive configs (zero stiffness + zero damping)
         try:
             joint_config = adapter.get_joint_config(prim_path)
             warnings = joint_config.get("warnings", [])
             if warnings:
                 result["warnings"] = warnings
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"create_robot: get_joint_config failed for {prim_path}: {e}")
+            traceback.print_exc()
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
