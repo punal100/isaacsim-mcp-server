@@ -23,6 +23,7 @@
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import carb
@@ -45,7 +46,7 @@ class USDLoader:
         """
         self.usd_prim = None
         self.material = None
-        self.working_dir = Path(os.environ.get("USD_WORKING_DIR", "/tmp/usd"))
+        self.working_dir = Path(os.environ.get("USD_WORKING_DIR") or Path(tempfile.gettempdir()) / "usd")
         self.stage = omni.usd.get_context().get_stage()
 
     def load_usd_model(self, abs_path=None, task_id=None):

@@ -23,6 +23,7 @@
 
 import asyncio
 import os
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -35,7 +36,7 @@ class Beaver3d:
         """Initialize Beaver3d with model name and API key from environment variables"""
         self.api_key = os.environ.get("ARK_API_KEY")
         self.model_name = os.environ.get("BEAVER3D_MODEL")
-        self._working_dir = Path(os.environ.get("USD_WORKING_DIR", "/tmp/usd"))
+        self._working_dir = Path(os.environ.get("USD_WORKING_DIR") or Path(tempfile.gettempdir()) / "usd")
         self.base_url = os.environ.get(
             "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
         )
