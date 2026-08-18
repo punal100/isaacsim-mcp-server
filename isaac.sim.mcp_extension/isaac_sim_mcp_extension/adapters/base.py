@@ -223,6 +223,30 @@ class IsaacAdapterBase(ABC):
         if initialized is not None:
             initialized.discard(prim_path)
 
+    def prepare_prim_for_delete(self, prim_path: str) -> None:
+        """Release any sensor on this prim and deactivate it, so a delete sticks.
+
+        An RTX sensor bound to a camera prim re-creates that prim on the tick
+        after DeletePrims: the prim is gone in the same tick, then reappears at
+        the end of the parent's children with its render product still targeting
+        it, so delete_object looked like it worked and did not. Neither wrapper
+        offers a teardown that stops this -- 6.0's CameraSensor/RtxCamera expose
+        no destroy() at all -- but deactivating the prim first breaks the
+        binding, and the delete then holds. Measured on 6.0.1: the camera was
+        still present 4s after a plain delete, and absent 4s after this one.
+
+        Harmless for ordinary prims: the delete removes them either way.
+        """
+        self.release_sensor(prim_path)
+        try:
+            stage = self.get_stage()
+            prim = stage.GetPrimAtPath(prim_path) if stage is not None else None
+            if prim and prim.IsValid():
+                prim.SetActive(False)
+        except Exception:
+            # Best effort — never block the delete the caller asked for.
+            pass
+
     def release_all_sensors(self) -> None:
         """Release every cached sensor — used when clearing the whole scene."""
         for cache_name in ("_camera_sensors", "_lidar_sensors"):

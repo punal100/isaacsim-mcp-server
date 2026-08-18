@@ -99,7 +99,15 @@ up at all.
   before deleting, which also frees the render product that otherwise keeps
   rendering for the life of the Kit process. Measured on 5.1.0: camera prims
   1 -> 0 and render products 2 -> 1 on delete, where both previously stayed put.
-  6.0 is unfixed — see known issues.
+
+  On 6.0 the wrappers offer no teardown at all — `RtxCamera` exposes only
+  `reset_to_default_state`, `reset_xform_op_properties` and `valid`, and Isaac
+  holds the instance internally — so the sensor re-created the prim on the tick
+  *after* the delete, reappearing at the end of the parent's children with its
+  render product still bound to it. Deactivating the prim before deleting breaks
+  that binding and the delete holds. Verified on both: the camera was still
+  present 4 s after a plain delete and absent 4 s after this one, with ordinary
+  prims unaffected.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -120,17 +128,6 @@ up at all.
 ### Known issues
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
-- Camera deletion is fixed on 5.1 but **not on 6.0**, and cannot be fixed at
-  this layer. `create_camera` builds an `RtxCamera`, and that class exposes no
-  teardown at all — only `reset_to_default_state`, `reset_xform_op_properties`
-  and `valid` — while Isaac holds the instance internally, so nothing can
-  release it. It re-creates the camera prim on the tick after a delete: the prim
-  is genuinely gone in the same tick, then reappears at the end of the parent's
-  children with its render product still targeting it
-  (`HydraTextures/camera_sensor_NNN -> camera: ['/World/C1']`). `delete_object`
-  now verifies the prim went and reports failure when it did not, but a handler
-  cannot wait a tick, so the reappearing case still slips through. Reuse a
-  camera rather than deleting it on 6.0.
 - On 5.1, `clear_scene` with several cameras alive still removes only one per
   pass, and Kit logs `SDGPipeline/Replicator_NN_Reference` attribute errors, so
   destroying a sensor appears to need a tick before its prim can go. A repeated

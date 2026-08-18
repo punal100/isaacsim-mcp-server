@@ -112,8 +112,9 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def delete_prim(self, prim_path: str) -> bool:
         import omni.kit.commands
 
-        # A live sensor wrapper keeps its prim alive; see release_sensor.
-        self.release_sensor(prim_path)
+        # A live sensor keeps its prim alive and re-creates it after a delete;
+        # see prepare_prim_for_delete.
+        self.prepare_prim_for_delete(prim_path)
         omni.kit.commands.execute("DeletePrims", paths=[prim_path])
         return True
 
