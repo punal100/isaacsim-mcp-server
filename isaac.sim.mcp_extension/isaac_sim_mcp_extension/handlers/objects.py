@@ -119,6 +119,32 @@ def delete(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict[s
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
         adapter.delete_prim(prim_path)
+
+        # Confirm it actually went, so an immediate failure is not reported as
+        # success. This cannot catch every case: an RTX camera on 6.0 is gone in
+        # this tick and back in the next, because its RtxCamera wrapper has no
+        # teardown method (only reset_to_default_state /
+        # reset_xform_op_properties / valid), Isaac holds it internally, and it
+        # re-creates the prim -- which reappears at the end of the parent's
+        # children with its render product still targeting it. A handler cannot
+        # wait a tick to check, so that case is documented in the changelog
+        # rather than detected here.
+        stage = adapter.get_stage()
+        if stage is not None:
+            survivor = stage.GetPrimAtPath(prim_path)
+            if survivor and survivor.IsValid():
+                is_camera = survivor.GetTypeName() == "Camera"
+                detail = (
+                    " On Isaac Sim 6.0 an RTX camera may also reappear a tick later; "
+                    "reuse the camera instead of deleting it."
+                    if is_camera
+                    else " Something still holds it; check for a live sensor or reference."
+                )
+                return {
+                    "status": "error",
+                    "message": f"{prim_path} still exists after delete.{detail}",
+                    "prim_path": prim_path,
+                }
         return {"status": "success", "message": f"Deleted {prim_path}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}

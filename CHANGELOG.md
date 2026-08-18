@@ -120,11 +120,17 @@ up at all.
 ### Known issues
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
-- Camera deletion is fixed on 5.1 but **not on 6.0**. 6.0's `CameraSensor` has
-  no `destroy()` — only `detach_annotators()`/`detach_writer()`, and neither
-  frees the prim — so a camera that has been captured and then deleted stays on
-  the stage permanently: `delete_object` reports success, a retry does nothing,
-  and `clear_scene` cannot remove it either. Root cause on 6.0 not yet found.
+- Camera deletion is fixed on 5.1 but **not on 6.0**, and cannot be fixed at
+  this layer. `create_camera` builds an `RtxCamera`, and that class exposes no
+  teardown at all — only `reset_to_default_state`, `reset_xform_op_properties`
+  and `valid` — while Isaac holds the instance internally, so nothing can
+  release it. It re-creates the camera prim on the tick after a delete: the prim
+  is genuinely gone in the same tick, then reappears at the end of the parent's
+  children with its render product still targeting it
+  (`HydraTextures/camera_sensor_NNN -> camera: ['/World/C1']`). `delete_object`
+  now verifies the prim went and reports failure when it did not, but a handler
+  cannot wait a tick, so the reappearing case still slips through. Reuse a
+  camera rather than deleting it on 6.0.
 - On 5.1, `clear_scene` with several cameras alive still removes only one per
   pass, and Kit logs `SDGPipeline/Replicator_NN_Reference` attribute errors, so
   destroying a sensor appears to need a tick before its prim can go. A repeated
