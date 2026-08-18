@@ -99,6 +99,7 @@ up at all.
   before deleting, which also frees the render product that otherwise keeps
   rendering for the life of the Kit process. Measured on 5.1.0: camera prims
   1 -> 0 and render products 2 -> 1 on delete, where both previously stayed put.
+  6.0 is unfixed — see known issues.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -119,11 +120,15 @@ up at all.
 ### Known issues
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
-- `clear_scene` still leaves some camera prims and their render products when
-  several cameras exist: destroying a sensor appears to need a tick before its
-  prim can go, so a batch clear removes one per pass and Kit logs
-  `SDGPipeline/Replicator_NN_Reference` attribute errors. `delete_object` on a
-  single camera is fixed; a repeated `clear_scene` eventually drains the rest.
+- Camera deletion is fixed on 5.1 but **not on 6.0**. 6.0's `CameraSensor` has
+  no `destroy()` — only `detach_annotators()`/`detach_writer()`, and neither
+  frees the prim — so a camera that has been captured and then deleted stays on
+  the stage permanently: `delete_object` reports success, a retry does nothing,
+  and `clear_scene` cannot remove it either. Root cause on 6.0 not yet found.
+- On 5.1, `clear_scene` with several cameras alive still removes only one per
+  pass, and Kit logs `SDGPipeline/Replicator_NN_Reference` attribute errors, so
+  destroying a sensor appears to need a tick before its prim can go. A repeated
+  `clear_scene` drains the rest.
 - `create_camera` has no look-at parameter, so aiming requires computing euler
   angles by hand.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second

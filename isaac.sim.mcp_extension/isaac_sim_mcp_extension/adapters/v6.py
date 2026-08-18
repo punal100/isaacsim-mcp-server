@@ -108,10 +108,13 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
             def _on_timeline_stop(_event):
                 self._articulations.clear()
-                # Sensor wrappers hold annotator subscriptions; drop them on
-                # stop so a fresh play cycle re-registers cleanly.
-                self._camera_sensors.clear()
-                self._lidar_sensors.clear()
+                # Sensor wrappers hold annotator subscriptions and a render
+                # product; release them on stop so a fresh play cycle
+                # re-registers cleanly. Dropping the dict entry is not enough --
+                # the subscriptions keep the wrapper, and the wrapper keeps its
+                # prim, so the camera then could not be deleted and its render
+                # product kept rendering. See base.release_sensor.
+                self.release_all_sensors()
 
             self._timeline_stop_subscription = carb.eventdispatcher.get_eventdispatcher().observe_event(
                 event_name=omni.timeline.GLOBAL_EVENT_STOP,

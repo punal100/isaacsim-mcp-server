@@ -205,10 +205,16 @@ class IsaacAdapterBase(ABC):
             sensor = cache.pop(prim_path, None)
             if sensor is None:
                 continue
-            destroy = getattr(sensor, "destroy", None)
-            if callable(destroy):
+            # 5.1's Camera exposes destroy(); 6.0's CameraSensor/LidarSensor
+            # do not — they expose detach_annotators()/detach_writer() instead.
+            # Try whichever the wrapper actually has, since a release that
+            # silently does nothing leaves the prim undeletable.
+            for method_name in ("destroy", "detach_annotators", "detach_writer"):
+                method = getattr(sensor, method_name, None)
+                if not callable(method):
+                    continue
                 try:
-                    destroy()
+                    method()
                 except Exception:
                     # Best effort: a wrapper that cannot tear itself down must
                     # not block the delete the caller actually asked for.
