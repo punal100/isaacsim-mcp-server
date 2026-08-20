@@ -95,24 +95,42 @@ def _clear_environment_contents(adapter: IsaacAdapterBase, stage) -> list:
     env = stage.GetPrimAtPath("/Environment")
     if not env or not env.IsValid():
         return []
-    removed = []
-    for child in list(env.GetChildren()):
-        if child.GetName() == "defaultLight":
-            continue
-        path = str(child.GetPath())
+    # Snapshot paths, not prim handles. Deleting one child expires the handles
+    # held for the others, and touching an expired one raises
+    # "Accessed invalid expired 'Xform' prim" -- which aborted the whole clear,
+    # so clear_scene failed outright on a stage that had an environment loaded.
+    child_paths = []
+    for child in env.GetChildren():
         try:
-            child.GetReferences().ClearReferences()
+            if child.GetName() != "defaultLight":
+                child_paths.append(str(child.GetPath()))
         except Exception:
-            pass
-        adapter.delete_prim(path)
-        removed.append(child.GetName())
+            continue
+    removed = []
+    for path in child_paths:
+        name = path.rsplit("/", 1)[-1]
+        try:
+            child = stage.GetPrimAtPath(path)
+            if not child or not child.IsValid():
+                continue
+            try:
+                child.GetReferences().ClearReferences()
+            except Exception:
+                pass
+            adapter.delete_prim(path)
+            removed.append(name)
+        except Exception:
+            # One stubborn child must not abort the rest of the clear.
+            continue
     # Older callers referenced straight onto /Environment; undo that too, along
     # with any axis/unit reconciliation transform authored for it.
     try:
         from pxr import UsdGeom
 
-        env.GetReferences().ClearReferences()
-        UsdGeom.Xformable(env).ClearXformOpOrder()
+        env = stage.GetPrimAtPath("/Environment")
+        if env and env.IsValid():
+            env.GetReferences().ClearReferences()
+            UsdGeom.Xformable(env).ClearXformOpOrder()
     except Exception:
         pass
     return removed
