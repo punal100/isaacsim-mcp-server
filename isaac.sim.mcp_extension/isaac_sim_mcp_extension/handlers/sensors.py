@@ -129,24 +129,50 @@ def get_point_cloud(
     try:
         pc = adapter.get_lidar_point_cloud(prim_path)
         point_count = len(pc) if pc is not None else 0
-        # An empty return means Replicator has not produced a frame for this
-        # sensor, not that the lidar saw nothing. Reporting it as success with
-        # "Got 0 points" is indistinguishable from a lidar aimed at empty space.
-        # Same gating as capture_image: RTX sensor data only flows while
-        # Replicator is capturing (/omni/replicator/captureOnPlay).
+        # An empty read has three different causes and they need different
+        # answers. The message used to give one -- "call play_simulation" --
+        # which is wrong advice two times out of three: it is baffling when you
+        # are already playing, and actively misleading when the lidar is simply
+        # looking at nothing (a sensor buried inside a robot returned 491 points
+        # in testing, and would return 0 if fully enclosed).
         if point_count == 0:
-            # No retry advice here, unlike capture_image. A single Replicator
-            # frame fills a camera but not a lidar: measured on 6.0.1 with the
-            # orchestrator at STEPPED and the render request completed, the
-            # sensor was still empty, and only play_simulation produced data.
+            timeline_state = ""
+            try:
+                timeline_state = str((adapter.get_simulation_state() or {}).get("timeline_state", "")).lower()
+            except Exception:
+                pass
+
+            if not timeline_state:
+                # Could not tell. Cover both, rather than guessing and sending
+                # the caller down the wrong path.
+                message = (
+                    f"No lidar data from {prim_path}. If the timeline is not running, call "
+                    "play_simulation — RTX lidar is produced by Replicator only while the sim runs. "
+                    "If it is already playing, retry: the sensor fills only on frames where a "
+                    "rotation completes. If it never fills, check the lidar is not inside geometry."
+                )
+            elif timeline_state != "playing":
+                message = (
+                    f"No lidar data from {prim_path}: the timeline is {timeline_state}. RTX lidar is "
+                    "produced by Replicator only while the sim runs, and one rendered frame is not "
+                    "enough — call play_simulation, then read again."
+                )
+            else:
+                # Playing, so frames are flowing. This annotator only yields on
+                # frames where a sweep completes, so an empty read is usually
+                # "not this frame" and a retry fixes it.
+                message = (
+                    f"No completed sweep from {prim_path} on this frame. The sensor fills only on "
+                    "frames where a rotation completes, so retry the same call — several attempts "
+                    "over a few seconds is normal. If it never fills, check the lidar is not inside "
+                    "geometry: one placed at a robot's own origin sees only the robot."
+                )
+
             return {
                 "status": "error",
-                "message": (
-                    f"No lidar frame available from {prim_path}. RTX lidar data is produced by "
-                    "Replicator while the timeline runs; a single rendered frame is not enough. "
-                    "Call play_simulation, then read the point cloud."
-                ),
+                "message": message,
                 "point_count": 0,
+                "timeline_state": timeline_state or "unknown",
             }
         # The decoded cloud used to be dropped here and only its length
         # returned, so a tool named get_lidar_point_cloud could not produce a

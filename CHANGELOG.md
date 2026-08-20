@@ -118,6 +118,14 @@ up at all.
   the scene), and takes `output_path` to write the full cloud as .npy for
   `numpy.load`. Measured: a summary with an 6-point sample is ~520 bytes.
   Both adapters.
+- **The lidar's empty-read message gave the wrong advice two times out of
+  three.** Every empty read said "call play_simulation", which is baffling when
+  you already are and misleading when the sensor is simply looking at nothing —
+  one placed at a robot's own origin returned 491 points in testing. The handler
+  now checks the timeline and answers the case it is actually in: stopped ("the
+  timeline is stopped — call play_simulation"), playing ("no completed sweep on
+  this frame — retry; the sensor fills only when a rotation completes"), or
+  indeterminate (covers both). Both adapters.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
