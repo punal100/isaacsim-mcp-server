@@ -166,6 +166,14 @@ def _install_isaac_stubs() -> None:
         if key not in sys.modules:
             sys.modules[key] = _make_stub(key)
 
+    # Schema classes the adapters pass to prim.HasAPI(). The bare stub module
+    # raises AttributeError for these, which guard code catches — silently
+    # turning the guard off in tests while it works in Kit.
+    usd_physics = sys.modules["pxr.UsdPhysics"]
+    for schema in ("ArticulationRootAPI", "RigidBodyAPI", "CollisionAPI"):
+        if not hasattr(usd_physics, schema):
+            setattr(usd_physics, schema, type(schema, (), {}))
+
 
 # Install stubs at collection time so that any test module importing
 # ``isaac_sim_mcp_extension`` does not get an ImportError.

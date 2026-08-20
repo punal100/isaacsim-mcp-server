@@ -178,7 +178,58 @@ up at all.
   `corrections` and `bounds`, and its `prim_path` now defaults to a named child
   of `/Environment` — read it from the response rather than assuming it.
 
+### Fixed — Newton engine parity for the debug loop
+
+- **A single Cone plus any robot permanently disabled physics on Newton.**
+  Newton builds its model through `SolverMuJoCo`, whose `geom_type_mapping` has
+  no entry for `GeoType.CONE` (9), so the conversion raises `KeyError:
+  np.int32(9)`. Kit catches it, logs `[Newton] Initialization failed:
+  np.int32(9)`, and latches `NewtonStage._init_failed = True` — a permanent
+  latch, after which `initialize_newton()` returns early forever and every
+  physics call dies with `Failed to create simulation view with backend
+  'newton'`. Verified unrecoverable: deleting the cone, `clear_scene`, and
+  rebuilding the `PhysicsScene` all still failed; only a Kit restart cleared it.
+  `step`, `play`, `execute_script`, `get_joint_config` and `create_robot`'s
+  joint report all went down together, so a session died on one `create_object`
+  call.
+
+  Measured on 6.0.1-rc.7, cold-booted per trial: cone + articulation bricks the
+  session; a cone alone, a cylinder + articulation, and cone + articulation
+  under PhysX are all fine — and 5.1 is unaffected (no Newton). The V6 adapter
+  now refuses to initialise Newton physics while a cone and an articulation
+  share the stage, naming the offending prims and pointing at
+  Cylinder/Capsule/Sphere/Cube or the PhysX engine. Refusing *before*
+  `initialize_physics()` is the whole point: the latch is never set, so
+  deleting the cone recovers the session (verified) instead of requiring a
+  restart. Articulation detection falls back to applied-schema names so a
+  missing schema binding cannot quietly switch the guard off.
+
+  This also explains three failing integration tests on Newton: the object
+  tests leave a Cone on the stage, so everything after them inherited a dead
+  simulator. `TestSimulationTools` now resets the stage it steps on.
+
+- **Action Graphs ticked during `step_simulation` on Newton.** V6 advances
+  Newton by pumping the app, which ticks OnPlaybackTick graphs — 30 ticks in a
+  30-step call — so a ScriptNode could overwrite the joint targets being
+  debugged, the exact hazard the PhysX path already guarded. The Newton pump
+  now runs inside `_graphs_suspended` and reports `graphs_suspended`. Measured
+  0 ticks during a step, with graphs restored for the following `play`.
+
 ### Known issues
+- **Joint drives do not converge on Newton with PhysX-tuned gains.** Commanding
+  the FR3 to j1=-0.4 / j3=-2.0 and stepping settles on PhysX in ~150 steps
+  (-0.399 / -2.000) but oscillates indefinitely on Newton: measured across 25.5s
+  of simulated time (1500 steps), j3 swung between -0.70 and -4.07 and never
+  settled, with stiffness 60000 / damping 6000 as shipped with the asset. The
+  stepping itself is sound — sim time advances 2.55s per 150 steps (60Hz) — so
+  this is a solver/gain difference, not a stepping bug, and it is left
+  untouched rather than papered over in the MCP layer. Re-tune the drive gains
+  for Newton, or debug motion on PhysX.
+
+  Beware a measurement trap here: joint reads taken when Newton is not actually
+  simulating echo the commanded values back *exactly* (-0.400000004), which
+  reads as perfect convergence. Real convergence carries residual error
+  (PhysX: -0.399). Confirm `current_time` advanced before trusting a joint read.
 
 - **Removing more than one RTX camera is unreliable, on both runtimes.** A
   single camera deletes cleanly and takes its render product with it (verified

@@ -795,8 +795,83 @@ class IsaacAdapterV6(IsaacAdapterBase):
             SimulationManager._cleanup_stale_physics_scenes()
         except Exception:
             pass
+        self._guard_newton_unsupported_geometry()
         SimulationManager.setup_simulation(dt=1.0 / 60.0)
         SimulationManager.initialize_physics()
+
+    # Newton builds its model through SolverMuJoCo, whose geom_type_mapping has
+    # no entry for GeoType.CONE (9) — see solver_mujoco.py add_geoms(). Kit
+    # catches the resulting KeyError, logs "[Newton] Initialization failed:
+    # np.int32(9)", and latches NewtonStage._init_failed = True. That latch is
+    # permanent: initialize_newton() returns early forever after, so every
+    # later physics call dies with "Failed to create simulation view with
+    # backend 'newton'" and NOTHING recovers it — verified that deleting the
+    # cone, clear_scene, and rebuilding the PhysicsScene all still fail. Only a
+    # Kit restart clears it.
+    #
+    # Measured on 6.0.1-rc.7: cone + articulation bricks the session, while a
+    # cone alone, a cylinder + articulation, and cone + articulation under
+    # PhysX are all fine. Refusing before initialize_physics() keeps the latch
+    # from ever being set, which is the difference between one bad tool call
+    # and a dead simulator.
+    NEWTON_UNSUPPORTED_TYPES = ("Cone",)
+
+    def _newton_unsupported_geometry(self) -> list:
+        """Cone prims that would brick Newton once an articulation is present."""
+        try:
+            stage = self.get_stage()
+        except Exception:
+            return []
+        if stage is None:
+            return []
+        cones, has_articulation = [], False
+        try:
+            from pxr import UsdPhysics
+
+            articulation_api = getattr(UsdPhysics, "ArticulationRootAPI", None)
+            for prim in stage.Traverse():
+                if prim.GetTypeName() in self.NEWTON_UNSUPPORTED_TYPES:
+                    cones.append(str(prim.GetPath()))
+                elif not has_articulation and self._is_articulation(prim, articulation_api):
+                    has_articulation = True
+        except Exception:
+            return []
+        return cones if (cones and has_articulation) else []
+
+    @staticmethod
+    def _is_articulation(prim, articulation_api) -> bool:
+        """Articulation test that survives a missing/renamed schema binding.
+
+        HasAPI() is the fast path; the applied-schema names are the fallback so
+        one AttributeError cannot quietly switch the cone guard off and let the
+        session get bricked instead.
+        """
+        if articulation_api is not None:
+            try:
+                return bool(prim.HasAPI(articulation_api))
+            except Exception:
+                pass
+        try:
+            return any("ArticulationRootAPI" in str(name) for name in prim.GetAppliedSchemas())
+        except Exception:
+            return False
+
+    def _guard_newton_unsupported_geometry(self) -> None:
+        """Refuse to initialise Newton physics on a stage that would latch it dead."""
+        if self._engine != "newton":
+            return
+        blockers = self._newton_unsupported_geometry()
+        if not blockers:
+            return
+        shown = ", ".join(blockers[:5]) + (" …" if len(blockers) > 5 else "")
+        raise RuntimeError(
+            "Newton cannot simulate Cone geometry together with an articulated "
+            f"robot — its MuJoCo solver has no cone shape. Offending prims: {shown}. "
+            "Initialising anyway would permanently disable physics for this Isaac "
+            "Sim session (only a restart recovers it), so the command was refused. "
+            "Delete the cone(s) and retry, replace them with Cylinder/Capsule/Sphere/"
+            "Cube, or run this scene on the PhysX engine, which supports cones."
+        )
 
     def _arm_reset_point(self) -> None:
         """Give stop_simulation something to restore to, without running the sim.
@@ -1315,26 +1390,39 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # frame-exact; pumping it instead changes its answers too (-2.987
         # against -3.322 over the same fall).
         approximate = self._engine == "newton"
+        suspended_graphs = []
         if approximate:
             import omni.kit.app
             import omni.timeline
 
             timeline = omni.timeline.get_timeline_interface()
             resume_paused = not timeline.is_playing()
-            if resume_paused:
-                timeline.play()
-            try:
-                for _ in range(num_steps):
-                    omni.kit.app.get_app().update()
-            finally:
+            # Running the timeline evaluates Action Graphs, so a ScriptNode
+            # controller re-commands the robot on every stepped frame and
+            # silently discards the caller's set_joint_positions -- measured on
+            # Newton as 30 ScriptNode ticks during a 30-frame step. PhysX never
+            # needed this because SimulationManager.step pumps only the physics
+            # pipeline. Suspending keeps the debug loop the same shape on both
+            # engines: step on a frozen timeline with graphs quiet, play for the
+            # graph-driven run.
+            with self._graphs_suspended() as suspended:
+                suspended_graphs = [str(path) for path in suspended] if suspended else []
                 if resume_paused:
-                    # Pause, not stop: stop resets to the spawn pose and throws
-                    # away the physics result being measured.
-                    timeline.pause()
+                    timeline.play()
+                try:
+                    for _ in range(num_steps):
+                        omni.kit.app.get_app().update()
+                finally:
+                    if resume_paused:
+                        # Pause, not stop: stop resets to the spawn pose and
+                        # throws away the physics result being measured.
+                        timeline.pause()
         else:
             SimulationManager.step(steps=num_steps)
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if suspended_graphs:
+            result["graphs_suspended"] = suspended_graphs
         if approximate:
             result["stepping"] = "approximate"
             result["stepping_note"] = (

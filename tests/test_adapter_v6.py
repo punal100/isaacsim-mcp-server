@@ -1001,3 +1001,88 @@ def test_v6_get_simulation_state_survives_a_missing_stage(monkeypatch):
 
     assert state["timeline_state"] == "stopped"
     assert state["physics_dt"] == 1.0 / 60.0
+
+
+# Newton's MuJoCo solver has no mapping for GeoType.CONE (9). Hitting it makes
+# Kit latch NewtonStage._init_failed = True, which permanently disables physics
+# for the whole session — deleting the cone, clear_scene and rebuilding the
+# PhysicsScene were all verified NOT to recover it on 6.0.1-rc.7. The adapter
+# therefore has to refuse *before* initialize_physics(), and only on Newton:
+# cones are fine under PhysX and on 5.1.
+def _cone_stage_adapter(monkeypatch, engine, prims):
+    """Build a V6 adapter over a stubbed stage of (type_name, has_articulation) prims."""
+
+    class _Prim:
+        def __init__(self, path, type_name, articulation):
+            self._path = path
+            self._type = type_name
+            self._articulation = articulation
+
+        def GetTypeName(self):
+            return self._type
+
+        def GetPath(self):
+            return self._path
+
+        def HasAPI(self, api):
+            return self._articulation
+
+    class _Stage:
+        def Traverse(self):
+            return [_Prim(path, type_name, art) for path, type_name, art in prims]
+
+    # Keep conftest's omni stub (the extension needs omni.ext at import time)
+    # and swap in only the stage-serving omni.usd.
+    omni_mod = sys.modules["omni"]
+    fake_usd_mod = types.ModuleType("omni.usd")
+    fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
+    monkeypatch.setattr(omni_mod, "usd", fake_usd_mod, raising=False)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {"get_active_physics_engine": classmethod(lambda cls, e=engine: e)},
+            )
+        ),
+    )
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    return v6_mod.IsaacAdapterV6()
+
+
+def test_v6_refuses_newton_physics_init_on_a_cone_with_an_articulation(monkeypatch):
+    adapter = _cone_stage_adapter(
+        monkeypatch,
+        "newton",
+        [("/World/Cone", "Cone", False), ("/World/Arm", "Xform", True)],
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter._guard_newton_unsupported_geometry()
+    message = str(excinfo.value)
+    assert "/World/Cone" in message
+    assert "PhysX" in message
+
+
+def test_v6_allows_a_cone_when_no_articulation_is_present(monkeypatch):
+    # Verified live: a cone alone simulates fine on Newton. Only the
+    # cone + articulation combination reaches the MuJoCo conversion.
+    adapter = _cone_stage_adapter(monkeypatch, "newton", [("/World/Cone", "Cone", False)])
+    adapter._guard_newton_unsupported_geometry()
+
+
+def test_v6_allows_a_cone_with_an_articulation_under_physx(monkeypatch):
+    adapter = _cone_stage_adapter(
+        monkeypatch,
+        "physx",
+        [("/World/Cone", "Cone", False), ("/World/Arm", "Xform", True)],
+    )
+    adapter._guard_newton_unsupported_geometry()

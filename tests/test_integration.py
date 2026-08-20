@@ -520,6 +520,19 @@ class TestAssetTools:
 
 @requires_isaac
 class TestSimulationTools:
+    @pytest.fixture(autouse=True, scope="class")
+    def clean_stage(self, conn: IsaacConnection) -> None:
+        """Step/play on a stage this class controls, not on earlier tests' debris.
+
+        The object tests leave a Cone behind, and Newton genuinely cannot
+        simulate a cone alongside an articulation (its MuJoCo solver has no cone
+        shape), so the adapter refuses to initialise physics. That refusal is
+        correct — these tests just have no business inheriting the leftovers.
+        """
+        send(conn, "simulation.stop")
+        send(conn, "scene.clear")
+        send(conn, "scene.create_physics", {"floor": True})
+
     def test_play(self, conn: IsaacConnection) -> None:
         resp = send(conn, "simulation.play")
         assert resp["status"] == "success", f"Failed: {resp}"
