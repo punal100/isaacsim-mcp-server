@@ -600,19 +600,29 @@ def _install_fake_omni(monkeypatch, timeline, app):
     monkeypatch.setitem(sys.modules, "omni.kit.app", fake_app_mod)
 
 
-def test_v6_step_must_not_pump_the_kit_event_loop(monkeypatch):
-    """step must not call omni.kit.app.update().
+def test_v6_step_pumps_only_for_newton(monkeypatch):
+    """PhysX stepping must not pump the kit event loop; Newton has to.
 
-    Handlers run as an asyncio Task on kit's main loop (see
-    SocketServer._dispatch_command). Pumping the loop from inside that Task
-    raises "Cannot enter into task <other> while another task <this handler> is
-    being executed" for every other pending kit task — property window,
-    viewport, USD cache listener, throttling, HTTP server — and invalidates the
-    physics tensor view, after which get_velocities fails with "Simulation view
-    object is invalidated". Verified on 6.0.1.
+    Pumping from inside the dispatch Task was believed unsafe everywhere: it can
+    raise "Cannot enter into task <other> while another task <this handler> is
+    being executed" for other pending kit tasks and invalidate the physics
+    tensor view, and asyncio only logs it, so step returns a plausible result
+    while the console shows the damage.
 
-    The errors never surface to the caller: asyncio logs them and step returns
-    a plausible-looking result, so only the kit console reveals the damage.
+    Re-measured on 6.0.1: it did not reproduce on either backend — 60 pumped
+    frames under isaac-sim.newton.sh logged no task errors and left the tensor
+    view valid (get_velocities returned -9.8100). And on Newton it is not
+    optional: no direct solver step advances that engine at all. Dropping a body
+    from z=20 for 60 steps, where free fall predicts z=15.095:
+
+        SimulationManager.step      z=20.0000  no motion
+        SimulationView.step(dt)     z=20.0000  no motion
+        physx.update_simulation     z=20.0000  no motion
+        pumped app.update()         z=15.0133  runs
+
+    PhysX keeps SimulationManager.step because it is frame-exact and pumping
+    changes its answers (-2.987 against -3.322 over the same fall). So the pump
+    must stay behind the Newton branch rather than becoming the general path.
     """
     import ast
     import os
@@ -628,14 +638,31 @@ def test_v6_step_must_not_pump_the_kit_event_loop(monkeypatch):
     with open(src_path) as f:
         text = f.read()
     tree = ast.parse(text)
-    step_src = None
+    step_node = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "step":
-            step_src = ast.get_source_segment(text, node)
+            step_node = node
             break
-    assert step_src is not None, "v6.step not found"
-    code = "\n".join(line.split("#", 1)[0] for line in step_src.splitlines())
-    assert "get_app().update()" not in code, "v6.step must not pump the kit event loop"
+    assert step_node is not None, "v6.step not found"
+
+    def strip_comments(segment):
+        return "\n".join(line.split("#", 1)[0] for line in segment.splitlines())
+
+    # The pump has to sit inside a branch selected by the active engine, and the
+    # other side of that branch has to be the exact PhysX step.
+    guarded = False
+    for node in ast.walk(step_node):
+        if not isinstance(node, ast.If):
+            continue
+        body = strip_comments("\n".join(ast.get_source_segment(text, n) or "" for n in node.body))
+        orelse = strip_comments("\n".join(ast.get_source_segment(text, n) or "" for n in node.orelse))
+        if "get_app().update()" in body and "SimulationManager.step" in orelse:
+            guarded = True
+            break
+    assert guarded, "the pump must be behind an engine branch whose other side is SimulationManager.step"
+
+    code = strip_comments(ast.get_source_segment(text, step_node) or "")
+    assert "newton" in code, "the branch must select on the Newton engine"
     assert "SimulationManager.step" in code
 
 

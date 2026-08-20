@@ -260,6 +260,31 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # adapters/transforms.py.
         set_transform(xformable, position=position, rotation=rotation, scale=scale)
 
+    def _simulated_position(self, prim_path: str) -> Optional[List[float]]:
+        """World position from the physics view, or None if it cannot be read.
+
+        Newton writes simulated transforms to Fabric and never back to USD, so a
+        USD read reports the spawn pose forever: measured on 6.0.1, a body
+        genuinely falling at -9.81 m/s still read z=20.0 through
+        GetLocalTransformation, at every point during play. The physics view has
+        the truth (19.54 while USD said 20.0), so rigid bodies are read from
+        there on that engine.
+
+        PhysX is left on the USD path deliberately: it writes back, and the USD
+        read carries the prim's own local transform rather than a world pose,
+        which is what the rest of this API reports.
+        """
+        try:
+            from isaacsim.core.experimental.prims import RigidPrim
+
+            positions, _ = RigidPrim(prim_path).get_world_poses()
+            array = positions.numpy() if hasattr(positions, "numpy") else positions
+            return [float(array[0][0]), float(array[0][1]), float(array[0][2])]
+        except Exception:
+            # Not a rigid body, physics not initialised, or the view is not
+            # ready — the USD value is the best available answer.
+            return None
+
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
         from pxr import UsdGeom
 
@@ -267,7 +292,13 @@ class IsaacAdapterV6(IsaacAdapterBase):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
-        return read_transform(UsdGeom.Xformable(prim))
+        transform = read_transform(UsdGeom.Xformable(prim))
+        if self._engine == "newton":
+            simulated = self._simulated_position(prim_path)
+            if simulated is not None:
+                transform["position"] = simulated
+                transform["position_source"] = "physics"
+        return transform
 
     def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
         stage = self.get_stage()
@@ -1266,9 +1297,50 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
         self._ensure_physics_world()
         self._arm_reset_point()
-        SimulationManager.step(steps=num_steps)
+
+        # Newton is not driven by any direct solver step. Measured on 6.0.1
+        # under isaac-sim.newton.sh, dropping a body from z=20 for 60 steps
+        # where free fall predicts z=15.095:
+        #
+        #     SimulationManager.step      z=20.0000  vz=0.0000   no motion
+        #     SimulationView.step(dt)     z=20.0000  vz=0.0000   no motion
+        #     physx.update_simulation     z=20.0000  vz=0.0000   no motion
+        #     pumped app.update()         z=14.8918  vz=-10.0063 runs
+        #
+        # so on Newton the app tick is the only thing that advances the solver,
+        # and step_simulation silently froze the world without it. The pump is
+        # about one step plus render jitter off exact, which is the accuracy
+        # ceiling available there — reported as "approximate" rather than
+        # implied to match PhysX. PhysX keeps SimulationManager.step, which is
+        # frame-exact; pumping it instead changes its answers too (-2.987
+        # against -3.322 over the same fall).
+        approximate = self._engine == "newton"
+        if approximate:
+            import omni.kit.app
+            import omni.timeline
+
+            timeline = omni.timeline.get_timeline_interface()
+            resume_paused = not timeline.is_playing()
+            if resume_paused:
+                timeline.play()
+            try:
+                for _ in range(num_steps):
+                    omni.kit.app.get_app().update()
+            finally:
+                if resume_paused:
+                    # Pause, not stop: stop resets to the spawn pose and throws
+                    # away the physics result being measured.
+                    timeline.pause()
+        else:
+            SimulationManager.step(steps=num_steps)
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if approximate:
+            result["stepping"] = "approximate"
+            result["stepping_note"] = (
+                "Newton advances only on the app tick, so these frames are about one step plus "
+                "render jitter off exact. Physics results are not frame-reproducible on this engine."
+            )
 
         if observe_prims:
             from pxr import UsdPhysics

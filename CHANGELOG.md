@@ -136,6 +136,31 @@ up at all.
   leaves the orientation alone when eye and target coincide rather than
   authoring a garbage one. The response echoes `aimed_at` and the `rotation` it
   applied. Both adapters.
+- **Newton was broken in two silent ways, and is now supported.** Nothing
+  errored, so `step_simulation` returned a frozen world and `get_prim_info`
+  reported the spawn pose forever.
+
+  *Stepping.* No direct solver call advances Newton. Dropping a body from z=20
+  for 60 steps, where free fall predicts 15.095: `SimulationManager.step`,
+  `SimulationView.step(dt)` and `physx.update_simulation` all left it at
+  20.0000 with zero velocity; only pumping the app tick ran the solver
+  (15.0133, vz -9.8100). Stepping is now engine-aware — PhysX keeps
+  `SimulationManager.step`, which is frame-exact, and Newton pumps. The Newton
+  response carries `stepping: "approximate"`, because the app tick is about one
+  step plus render jitter off exact and physics results are not
+  frame-reproducible there. Pumping PhysX instead would have changed its
+  answers too (-2.987 against -3.322 over the same fall), so it stays behind
+  the engine branch.
+
+  *Positions.* Newton writes simulated transforms to Fabric and never back to
+  USD, so every USD read returned the spawn pose — a body falling at -9.81 m/s
+  still read z=20.0. Rigid-body positions on Newton now come from the physics
+  view, tagged `position_source: "physics"`. Measured after the fix: 14.8918
+  after 60 steps and 2.8383 after a second of play, where both previously read
+  20.0. PhysX keeps the USD path, which writes back and carries the prim's own
+  local transform.
+
+  Newton smoke test went from 11 checks and a socket timeout to 19/19.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -172,6 +197,9 @@ up at all.
   camera rather than creating several; a simulator restart clears the strays.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second
   concurrent instance caused device-lost crashes during testing.
+- Newton physics is not frame-reproducible: stepping advances it through the app
+  tick, so repeated runs of the same scene differ slightly. Use PhysX where
+  exact stepping matters.
 
 ## [0.6.0] - 2026-06-13
 
