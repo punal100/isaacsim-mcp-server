@@ -128,10 +128,21 @@ up at all.
 ### Known issues
 - `get_lidar_point_cloud` returns `point_count` without the points themselves on
   6.0; the decoded cloud is discarded by the handler.
-- On 5.1, `clear_scene` with several cameras alive still removes only one per
-  pass, and Kit logs `SDGPipeline/Replicator_NN_Reference` attribute errors, so
-  destroying a sensor appears to need a tick before its prim can go. A repeated
-  `clear_scene` drains the rest.
+- **Removing more than one RTX camera is unreliable, on both runtimes.** A
+  single camera deletes cleanly and takes its render product with it (verified
+  repeatedly, cold-booted). With several alive, only the first one or two go:
+  measured 1 of 4 removed in one run and 2 of 4 in another with the same cadence
+  and different orderings, so it is a race in Replicator's pipeline rather than
+  an ordering rule. A camera that fails to delete is then stuck permanently —
+  Replicator re-creates both the prim and its render product, the prim
+  reappearing at the end of the parent's children — and repeated `clear_scene`
+  calls make no further progress.
+
+  Nothing reachable fixes it: neither wrapper exposes a working teardown
+  (6.0's `RtxCamera` has none at all), deleting the bound render product first
+  brings both back, and deactivating the prim is cosmetic — `capture_image`
+  still succeeds on an inactive prim, so the sensor keeps rendering. Reuse a
+  camera rather than creating several; a simulator restart clears the strays.
 - `create_camera` has no look-at parameter, so aiming requires computing euler
   angles by hand.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second
