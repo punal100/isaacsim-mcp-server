@@ -108,6 +108,16 @@ up at all.
   that binding and the delete holds. Verified on both: the camera was still
   present 4 s after a plain delete and absent 4 s after this one, with ordinary
   prims unaffected.
+- **`get_lidar_point_cloud` returned a count but no point cloud.** The handler
+  took `len()` of the decoded array and discarded it, so the tool could not
+  produce the thing it is named after. Returning the whole sweep is not the
+  answer either — 59k points is roughly 1.8 MB of JSON. It now returns a
+  summary by default (`point_count`, `bounds`, `nearest` hit, and the frame the
+  numbers are in), takes `max_points` to include a sample taken at an even
+  stride across the sweep rather than the first N (which would be one slice of
+  the scene), and takes `output_path` to write the full cloud as .npy for
+  `numpy.load`. Measured: a summary with an 6-point sample is ~520 bytes.
+  Both adapters.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -126,8 +136,7 @@ up at all.
   of `/Environment` — read it from the response rather than assuming it.
 
 ### Known issues
-- `get_lidar_point_cloud` returns `point_count` without the points themselves on
-  6.0; the decoded cloud is discarded by the handler.
+
 - **Removing more than one RTX camera is unreliable, on both runtimes.** A
   single camera deletes cleanly and takes its render product with it (verified
   repeatedly, cold-booted). With several alive, only the first one or two go:

@@ -120,7 +120,12 @@ def create_lidar(
         return {"status": "error", "message": str(e)}
 
 
-def get_point_cloud(adapter: IsaacAdapterBase, prim_path: str = "/World/Lidar") -> Dict[str, Any]:
+def get_point_cloud(
+    adapter: IsaacAdapterBase,
+    prim_path: str = "/World/Lidar",
+    max_points: Optional[int] = None,
+    output_path: Optional[str] = None,
+) -> Dict[str, Any]:
     try:
         pc = adapter.get_lidar_point_cloud(prim_path)
         point_count = len(pc) if pc is not None else 0
@@ -143,6 +148,80 @@ def get_point_cloud(adapter: IsaacAdapterBase, prim_path: str = "/World/Lidar") 
                 ),
                 "point_count": 0,
             }
-        return {"status": "success", "message": f"Got {point_count} points", "point_count": point_count}
+        # The decoded cloud used to be dropped here and only its length
+        # returned, so a tool named get_lidar_point_cloud could not produce a
+        # point cloud. Returning all of it is not the answer either: a sweep is
+        # tens of thousands of points and megabytes of JSON, which is ruinous
+        # for an agent's context. So the default is decision-grade summary, with
+        # the points available on request and the full array writable to disk --
+        # the same escape hatch capture_image offers via output_path.
+        #
+        # Deliberately plain Python rather than numpy: the unit suite stubs
+        # numpy, and a summary that only works inside Kit is a summary nobody
+        # tests.
+        rows = [(float(p[0]), float(p[1]), float(p[2])) for p in pc]
+        min_x = min_y = min_z = float("inf")
+        max_x = max_y = max_z = float("-inf")
+        nearest_sq = float("inf")
+        nearest_point = rows[0]
+        for x, y, z in rows:
+            if x < min_x:
+                min_x = x
+            if y < min_y:
+                min_y = y
+            if z < min_z:
+                min_z = z
+            if x > max_x:
+                max_x = x
+            if y > max_y:
+                max_y = y
+            if z > max_z:
+                max_z = z
+            d2 = x * x + y * y + z * z
+            if d2 < nearest_sq:
+                nearest_sq, nearest_point = d2, (x, y, z)
+
+        result: Dict[str, Any] = {
+            "status": "success",
+            "message": f"Got {point_count} points",
+            "point_count": point_count,
+            "bounds": {
+                "min": [round(min_x, 4), round(min_y, 4), round(min_z, 4)],
+                "max": [round(max_x, 4), round(max_y, 4), round(max_z, 4)],
+            },
+            "nearest": {
+                "distance": round(nearest_sq**0.5, 4),
+                "point": [round(v, 4) for v in nearest_point],
+            },
+            "frame": "sensor-local coordinates, meters",
+        }
+
+        if output_path:
+            # .npy so the caller gets every point at full precision;
+            # numpy.load(path) reads it back as an (N, 3) array.
+            try:
+                import numpy as np
+
+                target = output_path if str(output_path).endswith(".npy") else f"{output_path}.npy"
+                np.save(target, np.asarray(rows, dtype="float32"))
+                result["output_path"] = target
+            except Exception as exc:
+                result["output_error"] = f"could not write {output_path}: {exc}"
+
+        if max_points:
+            limit = max(1, int(max_points))
+            if point_count > limit:
+                # Even stride rather than the first N: a sweep is ordered by
+                # beam, so the head of the array is one slice of the scene.
+                stride = -(-point_count // limit)
+                sample = rows[::stride][:limit]
+                result["sampled"] = True
+                result["sample_stride"] = stride
+            else:
+                sample = rows
+                result["sampled"] = False
+            result["points"] = [[round(v, 4) for v in row] for row in sample]
+
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

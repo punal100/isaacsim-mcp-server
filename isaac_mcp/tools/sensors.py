@@ -24,7 +24,7 @@
 """Sensor MCP tools."""
 
 import json
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -111,15 +111,36 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("get_lidar_point_cloud")
-    def get_lidar_point_cloud(prim_path: str = "/World/Lidar") -> str:
+    def get_lidar_point_cloud(
+        prim_path: str = "/World/Lidar",
+        max_points: Optional[int] = None,
+        output_path: Optional[str] = None,
+    ) -> str:
         """Get point cloud data from a lidar sensor.
+
+        Requires the timeline to be playing — RTX lidar data is produced by
+        Replicator while the sim runs, and a sweep only completes on some
+        frames, so an empty read means "not this frame", not "saw nothing".
+
+        By default returns a summary rather than the raw cloud: point_count,
+        bounds, and the nearest hit. A full sweep is tens of thousands of points
+        and megabytes of JSON, which is rarely what you want in a response.
 
         Args:
             prim_path: Prim path of the lidar sensor.
+            max_points: Include this many points in the response, sampled at an
+                even stride across the sweep. Omit for summary only.
+            output_path: Write the complete cloud to this .npy file and return
+                its path; numpy.load() reads it back as an (N, 3) array.
         """
         try:
             conn = get_connection()
-            result = conn.send_command("sensors.get_point_cloud", {"prim_path": prim_path})
+            params: Dict[str, Any] = {"prim_path": prim_path}
+            if max_points is not None:
+                params["max_points"] = max_points
+            if output_path:
+                params["output_path"] = output_path
+            result = conn.send_command("sensors.get_point_cloud", params)
             return json.dumps(result, indent=2)
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)})
