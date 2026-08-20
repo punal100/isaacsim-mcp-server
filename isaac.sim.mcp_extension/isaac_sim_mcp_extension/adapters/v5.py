@@ -1040,21 +1040,60 @@ class IsaacAdapterV5(IsaacAdapterBase):
         omni.kit.commands.execute("CopyPrim", path_from=source_path, path_to=target_path)
 
     def import_urdf(self, urdf_path: str, prim_path: str = "/World/robot", **kwargs) -> Any:
+        # URDFImportRobot needs the *parsed* robot object; without urdf_robot it
+        # calls import_robot(None) and returns (False, None). And its dest_path
+        # is a USD *file* path to write (it runs Usd.Stage.CreateNew on it), not
+        # a prim path — passing "/World/robot" made it try to author a stage at
+        # that filename. Both mistakes failed silently: the command's False was
+        # returned unchecked, so the handler reported a successful import while
+        # nothing whatsoever landed on the stage. Verified on 5.1 against three
+        # different URDFs (fr3, lula_franka_gen, cobotta_pro_900): status
+        # success, requested prim absent, zero articulations on the stage.
+        #
+        # dest_path="" imports in-memory onto the open stage and returns the
+        # prim path it chose (the robot's own name, e.g. "/fr3"), so the result
+        # is moved to the requested prim_path and verified before returning.
         import os
 
         if not os.path.isfile(urdf_path):
             raise FileNotFoundError(f"URDF file not found: {urdf_path}")
         import omni.kit.commands
 
-        status, import_config = omni.kit.commands.execute("URDFCreateImportConfig")
-        omni.kit.commands.execute("URDFParseFile", urdf_path=urdf_path, import_config=import_config)
-        result = omni.kit.commands.execute(
+        _status, import_config = omni.kit.commands.execute("URDFCreateImportConfig")
+        parsed, urdf_robot = omni.kit.commands.execute(
+            "URDFParseFile", urdf_path=urdf_path, import_config=import_config
+        )
+        if not parsed or urdf_robot is None:
+            raise RuntimeError(f"URDF parse failed for {urdf_path}")
+
+        imported, imported_path = omni.kit.commands.execute(
             "URDFImportRobot",
             urdf_path=urdf_path,
+            urdf_robot=urdf_robot,
             import_config=import_config,
-            dest_path=prim_path,
+            dest_path="",
         )
-        return result
+        if not imported or not imported_path:
+            raise RuntimeError(f"URDF import failed for {urdf_path} (importer returned no prim)")
+
+        return self._relocate_imported_prim(imported_path, prim_path)
+
+    def _relocate_imported_prim(self, imported_path: str, prim_path: str) -> str:
+        """Move a freshly imported robot to the requested path; report where it really is."""
+        stage = self.get_stage()
+        if not prim_path or imported_path == prim_path:
+            return imported_path
+        try:
+            import omni.kit.commands
+
+            omni.kit.commands.execute("MovePrim", path_from=imported_path, path_to=prim_path)
+        except Exception:
+            pass
+        # Never claim a path that is not on the stage — that is the bug this
+        # whole method exists to stop.
+        if stage.GetPrimAtPath(prim_path):
+            return prim_path
+        return imported_path
 
     # ── Simulation ─────────────────────────────────────────
 

@@ -49,10 +49,20 @@ def import_urdf(
     try:
         if not urdf_path:
             return {"status": "error", "message": "urdf_path is required"}
-        _result = adapter.import_urdf(urdf_path, prim_path=prim_path)
+        result = adapter.import_urdf(urdf_path, prim_path=prim_path)
+        # Report where the robot actually landed. The importer picks its own
+        # prim name and the adapter may not be able to move it, so echoing the
+        # requested path made a failed import look like a successful one.
+        actual = result if isinstance(result, str) and result else prim_path
+        if not adapter.get_stage().GetPrimAtPath(actual):
+            return {"status": "error", "message": f"URDF import produced no prim on the stage for {urdf_path}"}
         if position:
-            adapter.set_prim_transform(prim_path, position=position)
-        return {"status": "success", "message": f"Imported URDF from {urdf_path}", "prim_path": prim_path}
+            adapter.set_prim_transform(actual, position=position)
+        response = {"status": "success", "message": f"Imported URDF from {urdf_path}", "prim_path": actual}
+        if actual != prim_path:
+            response["requested_prim_path"] = prim_path
+            response["message"] += f" (imported at {actual}, not the requested {prim_path})"
+        return response
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

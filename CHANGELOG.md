@@ -215,7 +215,36 @@ up at all.
   now runs inside `_graphs_suspended` and reports `graphs_suspended`. Measured
   0 ticks during a step, with graphs restored for the following `play`.
 
+### Fixed — URDF import silently imported nothing on 5.1
+
+- **`import_urdf` reported success while nothing reached the stage (V5).**
+  `URDFImportRobot` needs the *parsed* robot object; the adapter passed only
+  `urdf_path`, so the command called `import_robot(None)` and returned
+  `(False, None)`. It also passed the requested *prim* path as `dest_path`,
+  which that command treats as a USD *file* to author (`Usd.Stage.CreateNew`).
+  The `False` was returned unchecked and the handler echoed back the requested
+  prim path, so callers got `{"status": "success", "prim_path": "/World/robot"}`
+  with zero prims, zero joints and zero articulations on the stage. Reproduced
+  on 5.1 with fr3, lula_franka_gen and cobotta_pro_900 — all three "succeeded".
+
+  Now the parse result is checked, the robot object is passed through,
+  `dest_path=""` imports onto the open stage, and the prim is moved to the
+  requested path. The handler verifies the prim exists before reporting success
+  and reports where the robot actually landed (`requested_prim_path` is added
+  when the importer chose a different name). Verified cold on 5.1: the FR3
+  imports to the requested path with 9 DOF readable. 6.0 was never affected —
+  V6 converts to USD and references it.
+
 ### Known issues
+- **V5 reports 0 DOF for every articulation after the second `clear_scene`.**
+  On a cold 5.1, `clear_scene` -> `create_physics_scene` -> `create_robot` ->
+  `get_joint_positions` returns 9 DOF on the first cycle and 0 on every cycle
+  after it, permanently, for `create_robot` and `import_urdf` alike. The prims
+  and joints are on the stage (11 joint prims, articulation root present) — it
+  is the physics view that is not rebuilt, the trap documented in
+  `_ensure_physics_world`. `World.clear_instance()` does not recover it. Not
+  yet fixed; rebuild the scene by restarting Isaac Sim rather than clearing it
+  twice, and confirm DOF is non-zero before trusting a joint read.
 - **Joint drives do not converge on Newton with PhysX-tuned gains.** Commanding
   the FR3 to j1=-0.4 / j3=-2.0 and stepping settles on PhysX in ~150 steps
   (-0.399 / -2.000) but oscillates indefinitely on Newton: measured across 25.5s
