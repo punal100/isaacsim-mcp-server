@@ -126,6 +126,16 @@ up at all.
   timeline is stopped — call play_simulation"), playing ("no completed sweep on
   this frame — retry; the sensor fills only when a rotation completes"), or
   indeterminate (covers both). Both adapters.
+- **`create_camera` gained `target=`**, so a camera can be aimed at a point
+  instead of by hand-computed euler angles. Cameras look down their local -Z and
+  this extension's creation path gives them a non-identity `orient`, so aiming
+  by arithmetic produced pictures of the sky even when the arithmetic was right
+  — it took three attempts to frame one shot during testing. `target` needs a
+  position (passed, or already on the prim), uses +Z as up, swaps the up axis
+  when the view is parallel to it so straight-up and straight-down work, and
+  leaves the orientation alone when eye and target coincide rather than
+  authoring a garbage one. The response echoes `aimed_at` and the `rotation` it
+  applied. Both adapters.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
   when a path did not exist. It validates both prims and names the offending
   one. Both adapters.
@@ -160,8 +170,6 @@ up at all.
   brings both back, and deactivating the prim is cosmetic — `capture_image`
   still succeeds on an inactive prim, so the sensor keeps rendering. Reuse a
   camera rather than creating several; a simulator restart clears the strays.
-- `create_camera` has no look-at parameter, so aiming requires computing euler
-  angles by hand.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second
   concurrent instance caused device-lost crashes during testing.
 

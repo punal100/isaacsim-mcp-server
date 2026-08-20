@@ -43,13 +43,36 @@ def create_camera(
     position: Optional[Sequence[float]] = None,
     rotation: Optional[Sequence[float]] = None,
     resolution: Optional[Sequence[int]] = None,
+    target: Optional[Sequence[float]] = None,
 ) -> Dict[str, Any]:
     try:
         res = tuple(resolution) if resolution else (1280, 720)
         _cam = adapter.create_camera(prim_path, resolution=res)
+
+        aimed_at = None
+        if target is not None:
+            # Aiming needs a position to aim from. Fall back to the prim's
+            # current one so target alone still works on an existing camera.
+            eye = position
+            if eye is None:
+                try:
+                    eye = (adapter.get_prim_transform(prim_path) or {}).get("position")
+                except Exception:
+                    eye = None
+            if eye is not None:
+                from ..adapters.transforms import look_at_euler
+
+                aimed = look_at_euler(eye, target)
+                if aimed is not None:
+                    rotation, aimed_at = aimed, [float(v) for v in target]
+
         if position or rotation:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation)
-        return {"status": "success", "message": f"Camera created at {prim_path}", "prim_path": prim_path}
+        result = {"status": "success", "message": f"Camera created at {prim_path}", "prim_path": prim_path}
+        if aimed_at is not None:
+            result["aimed_at"] = aimed_at
+            result["rotation"] = rotation
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

@@ -40,14 +40,23 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         resolution: Optional[List[int]] = None,
+        target: Optional[List[float]] = None,
     ) -> str:
         """Add a camera sensor to the scene.
+
+        Prefer target= over rotation= for aiming: cameras look down their local
+        -Z and carry a built-in orientation, so hand-computed euler angles are
+        easy to get wrong and give you a picture of the sky. The response echoes
+        the rotation that was applied under "rotation" and the point under
+        "aimed_at".
 
         Args:
             prim_path: Prim path for the camera.
             position: [x, y, z] world position.
-            rotation: [rx, ry, rz] rotation in degrees.
+            rotation: [rx, ry, rz] rotation in degrees. Ignored if target is given.
             resolution: [width, height] image resolution. Default 1280x720.
+            target: [x, y, z] world point to look at, using +Z as up. Needs a
+                position — either passed here or already on the prim.
         """
         try:
             conn = get_connection()
@@ -56,6 +65,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
                 params["position"] = position
             if rotation:
                 params["rotation"] = rotation
+            if target:
+                params["target"] = target
             if resolution:
                 params["resolution"] = resolution
             result = conn.send_command("sensors.create_camera", params)

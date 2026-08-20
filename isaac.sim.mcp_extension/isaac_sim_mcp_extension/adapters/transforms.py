@@ -160,3 +160,40 @@ def read_transform(xformable) -> Dict[str, Any]:
         "rotation_units": "degrees",
         "scale": [round(float(v), 6) for v in scale],
     }
+
+
+def look_at_euler(eye, target, up=(0.0, 0.0, 1.0)):
+    """XYZ euler degrees that aim a camera at ``target`` from ``eye``.
+
+    Cameras look down their local -Z, and this extension's own creation path
+    gives them a non-identity ``orient``, so aiming one by hand meant composing
+    that built-in orientation with euler angles worked out by trigonometry --
+    three guess-and-check attempts in practice, and a shot of the sky when the
+    arithmetic was right but the composition was not.
+
+    Returned in the same XYZ-degrees convention ``set_transform`` accepts and
+    ``read_transform`` reports, so a camera aimed this way reads back
+    consistently.
+
+    Returns ``None`` when there is no direction to derive -- eye and target
+    coincident -- so the caller can leave the orientation alone rather than
+    author a garbage one.
+    """
+    from pxr import Gf
+
+    eye_v = Gf.Vec3d(*(float(v) for v in eye))
+    target_v = Gf.Vec3d(*(float(v) for v in target))
+    direction = target_v - eye_v
+    if direction.GetLength() < 1e-9:
+        return None
+
+    up_v = Gf.Vec3d(*(float(v) for v in up))
+    # Looking straight along the up axis leaves the roll undefined and SetLookAt
+    # degenerates; swap in an axis that is not parallel to the view direction.
+    if abs(Gf.Vec3d(direction).GetNormalized() * up_v.GetNormalized()) > 0.999:
+        up_v = Gf.Vec3d(0.0, 1.0, 0.0) if abs(up_v[2]) > 0.5 else Gf.Vec3d(0.0, 0.0, 1.0)
+
+    world = Gf.Matrix4d().SetLookAt(eye_v, target_v, up_v).GetInverse()
+    world.Orthonormalize()
+    rz, ry, rx = world.ExtractRotation().Decompose(Gf.Vec3d(0, 0, 1), Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0))
+    return [round(float(rx), 6), round(float(ry), 6), round(float(rz), 6)]
