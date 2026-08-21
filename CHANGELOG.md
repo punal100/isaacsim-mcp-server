@@ -235,16 +235,43 @@ up at all.
   imports to the requested path with 9 DOF readable. 6.0 was never affected —
   V6 converts to USD and references it.
 
+### Fixed — V5 reported 0 DOF for every articulation after the second clear_scene
+
+- **Root cause: the physics view is a process-level singleton that Kit only
+  invalidates from its timeline STOP callback.** The MCP debug loop is
+  step-only and never plays, so that callback never fires. The view built for
+  the first robot of a session survived `clear_scene`, kept pointing at the
+  deleted prims, and never learned about articulations created afterwards;
+  `SingleArticulation.initialize()` then failed with `'NoneType' object has no
+  attribute 'link_names'`, which the read path swallowed, so joint reads
+  returned 0 DOF from the second robot onward — permanently, for `create_robot`
+  and `import_urdf` alike.
+
+  Measured on a cold 5.1: `clear_scene` -> `create_physics_scene` ->
+  `create_robot` -> `get_joint_positions` read 9 DOF on cycle 1 and 0 on cycles
+  2-4, with the sim view object *identical* (same `id()`) across all four while
+  the `World` was rebuilt each time — which is why `World.clear_instance()`
+  never helped: `World.physics_sim_view` just delegates to
+  `SimulationManager.get_physics_sim_view()`.
+
+  A failed articulation read now rebuilds the view once and retries. The
+  rebuild goes through the PHYSICS_WARMUP event rather than
+  `World.initialize_physics()`, which calls `play()` and would start the
+  timeline underneath a step-only session (verified: the timeline stays
+  `stopped`). Verified cold on 5.1: four clear -> robot cycles now read 9 DOF
+  each (was 9, 0, 0, 0), and all three test URDFs import with correct DOF
+  (9 / 9 / 12) where only the first used to work.
+
+  **Two constraints are encoded in tests because violating them crashed the
+  simulator.** An earlier version of this fix rebuilt the view eagerly whenever
+  a reference landed on the stage; that killed Kit with `PhysX ABORT: cannot
+  start GPU simulation because of previous CUDA errors! Error code 700` during
+  the integration suite. Controlled A/B, cold-booted: 43/43 passing with the
+  refresh removed, hard crash with it. `initialize_physics()` drives
+  `start_simulation()`/`fetch_results()`, so it must run only after a read has
+  proven the view stale, and never while the timeline is live.
+
 ### Known issues
-- **V5 reports 0 DOF for every articulation after the second `clear_scene`.**
-  On a cold 5.1, `clear_scene` -> `create_physics_scene` -> `create_robot` ->
-  `get_joint_positions` returns 9 DOF on the first cycle and 0 on every cycle
-  after it, permanently, for `create_robot` and `import_urdf` alike. The prims
-  and joints are on the stage (11 joint prims, articulation root present) — it
-  is the physics view that is not rebuilt, the trap documented in
-  `_ensure_physics_world`. `World.clear_instance()` does not recover it. Not
-  yet fixed; rebuild the scene by restarting Isaac Sim rather than clearing it
-  twice, and confirm DOF is non-zero before trusting a joint read.
 - **Joint drives do not converge on Newton with PhysX-tuned gains.** Commanding
   the FR3 to j1=-0.4 / j3=-2.0 and stepping settles on PhysX in ~150 steps
   (-0.399 / -2.000) but oscillates indefinitely on Newton: measured across 25.5s

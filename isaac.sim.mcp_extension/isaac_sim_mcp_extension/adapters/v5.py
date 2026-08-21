@@ -186,6 +186,65 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
         return add_reference_to_stage(usd_path, prim_path)
 
+    def _refresh_stale_physics_view(self) -> bool:
+        """Rebuild the physics view after an articulation read found it stale.
+
+        The view is a process-level singleton that enumerates articulations when
+        it is built, and Kit only ever invalidates it from `_on_stop` — a
+        *timeline STOP event*. The MCP debug loop is step-only and never plays,
+        so that event never fires: the view built for the first robot survives
+        clear_scene, still points at the deleted prims, and never learns about
+        articulations added later. SingleArticulation.initialize() then fails
+        with "'NoneType' object has no attribute 'link_names'", which the read
+        path swallows, so every joint read reports 0 DOF from the second robot
+        of a session onward — permanently. Measured on 5.1: cycle 1 of
+        clear -> physics -> robot reads 9 DOF, cycles 2-4 read 0, with the sim
+        view object identical (same id) across all four.
+
+        Two constraints learned the hard way, both by crashing the simulator:
+
+        * This runs ONLY from the read path, after a read has already failed —
+          never eagerly on asset creation. Rebuilding on every add_reference
+          call killed Kit with "PhysX ABORT: cannot start GPU simulation
+          because of previous CUDA errors! Error code 700" during the
+          integration suite (43/43 passing without it, hard crash with it).
+        * It refuses while the timeline is live. initialize_physics() drives
+          start_simulation()/fetch_results(), and doing that underneath a
+          running scene is what corrupts the GPU pipeline.
+
+        Returns True when the view was actually rebuilt and the read is worth
+        retrying.
+        """
+        import omni.timeline
+
+        timeline = omni.timeline.get_timeline_interface()
+        if timeline.is_playing() or not timeline.is_stopped():
+            return False
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+        except ImportError:
+            return False
+        try:
+            for attr in ("_physics_sim_view", "_physics_sim_view__warp"):
+                view = getattr(SimulationManager, attr, None)
+                if view is not None:
+                    try:
+                        view.invalidate()
+                    except Exception:
+                        pass
+                    setattr(SimulationManager, attr, None)
+            SimulationManager._simulation_view_created = False
+            # _create_simulation_view is subscribed to PHYSICS_WARMUP, and
+            # initialize_physics() only dispatches that event while
+            # _warmup_needed is set — normally by the STOP callback.
+            SimulationManager._warmup_needed = True
+            self._resync_physics_scene_cache()
+            SimulationManager.initialize_physics()
+            return True
+        except Exception as exc:
+            print(f"_refresh_stale_physics_view: could not rebuild the physics view ({exc})")
+            return False
+
     def set_prim_transform(
         self,
         prim_path: str,
@@ -574,20 +633,32 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 names.append(desc.GetName())
         return names
 
-    def get_joint_positions(self, prim_path: str) -> List[float]:
+    def _articulation_positions(self, prim_path: str) -> Optional[List[float]]:
+        """Joint positions from the physics view, or None when it cannot serve them."""
         from isaacsim.core.prims import SingleArticulation
 
-        # Ensure physics is initialized so SingleArticulation.initialize() works
-        self._ensure_physics_world()
-
-        art = SingleArticulation(prim_path=prim_path)
         try:
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
             positions = art.get_joint_positions()
             if positions is not None:
                 return positions.tolist()
         except Exception:
-            pass
+            return None
+        return None
+
+    def get_joint_positions(self, prim_path: str) -> List[float]:
+
+        # Ensure physics is initialized so SingleArticulation.initialize() works
+        self._ensure_physics_world()
+
+        positions = self._articulation_positions(prim_path)
+        if positions is None and self._refresh_stale_physics_view():
+            # The physics view outlived the prims it was built against; it has
+            # been rebuilt, so the same read is worth exactly one retry.
+            positions = self._articulation_positions(prim_path)
+        if positions is not None:
+            return positions
 
         # Fallback: read drive target positions from USD
         # WARNING: these are authored targets, not actual physics positions

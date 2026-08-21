@@ -233,3 +233,60 @@ def test_physics_warm_skipped_without_a_scene():
         if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
             src = ast.get_source_segment(text, node)
     assert "_stage_has_physics_scene" in src, "must skip warming when the stage has no PhysicsScene"
+
+
+def _v5_function_src(name):
+    """Source of a named method in v5.py, for invariant checks."""
+    import ast
+    import os
+
+    with open(os.path.join(ADAPTERS, "v5.py")) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node)
+    return ""
+
+
+def test_v5_refreshes_the_physics_view_from_the_read_path():
+    """A joint read must be able to heal a physics view that outlived its prims.
+
+    Kit invalidates the view only from its timeline STOP callback. The MCP debug
+    loop is step-only and never plays, so after clear_scene the view still
+    points at deleted prims and never sees articulations created afterwards:
+    SingleArticulation.initialize() fails with "'NoneType' object has no
+    attribute 'link_names'" and every joint read reports 0 DOF from the second
+    robot of a session onward. Measured on 5.1: 9 DOF on cycle 1, then 0 on
+    cycles 2-4, with the sim view object identical across all four.
+    """
+    src = _v5_function_src("get_joint_positions")
+    assert src, "get_joint_positions not found"
+    assert "_refresh_stale_physics_view" in src, "a failed articulation read must rebuild the stale view and retry"
+
+
+def test_v5_view_refresh_never_runs_eagerly_on_asset_creation():
+    """Rebuilding on every asset add crashed the simulator — keep it off that path.
+
+    initialize_physics() drives start_simulation()/fetch_results(); calling that
+    each time a reference lands killed Kit with "PhysX ABORT: cannot start GPU
+    simulation because of previous CUDA errors! Error code 700" during the
+    integration suite, which passes 43/43 without it. The refresh belongs only
+    where a read has already proven the view is stale.
+    """
+    for name in ("add_reference_to_stage", "import_urdf"):
+        src = _v5_function_src(name)
+        assert src, f"{name} not found"
+        code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+        assert "refresh" not in code, f"{name} must not rebuild the physics view eagerly — it crashes PhysX"
+
+
+def test_v5_view_refresh_refuses_while_the_timeline_is_live():
+    """Rebuilding underneath a running scene is what corrupts the GPU pipeline."""
+    src = _v5_function_src("_refresh_stale_physics_view")
+    assert src, "_refresh_stale_physics_view not found"
+    assert "is_playing" in src and "is_stopped" in src, "the refresh must refuse unless the timeline is stopped"
+    assert "initialize_physics" in src, "the rebuild goes through the warmup event"
+    assert "world.initialize_physics" not in src.lower().replace(" ", ""), (
+        "World.initialize_physics() calls play() and would start the timeline under a step-only session"
+    )
