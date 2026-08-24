@@ -218,7 +218,14 @@ class IsaacAdapterV5(IsaacAdapterBase):
         import omni.timeline
 
         timeline = omni.timeline.get_timeline_interface()
-        if timeline.is_playing() or not timeline.is_stopped():
+        # Refuse only while the timeline is LIVE, not merely paused.
+        # step_simulation leaves the timeline PAUSED, which is exactly where a
+        # stale view gets discovered, so requiring is_stopped() meant the heal
+        # never ran there. Measured on 5.1 with two robots: with the stricter
+        # guard, deleting one left the survivor's reads and commands falling
+        # through to the drive-target fallback (6/9 checks); allowing paused
+        # restores them to physics-backed (8/9).
+        if timeline.is_playing():
             return False
         try:
             from isaacsim.core.simulation_manager import SimulationManager

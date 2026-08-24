@@ -391,7 +391,35 @@ up at all.
   everywhere, plus smoke 19/19 and integration 43/43 on each. The two EXT are
   `search_usd` and `generate_3d`, which need API keys.
 
+### Changed — the V5 view heal now runs from a paused timeline
+
+- `step_simulation` leaves the timeline paused, which is exactly where a stale
+  physics view gets discovered, but the heal required a fully stopped timeline
+  and so never ran there. Measured on 5.1 with two robots: deleting one left the
+  survivor's reads and commands falling through to the drive-target fallback
+  (6 of 9 multi-robot checks); healing from paused restores them to
+  physics-backed (8 of 9). It still refuses while the timeline is live, the
+  constraint that keeps PhysX from aborting the GPU pipeline.
+
 ### Known issues
+- **Commanding one of several robots can be silently dropped (5.1).** With two
+  articulations on the stage, `set_joint_positions` on the first reports success
+  and the arm then only sags to -0.024 against a -0.5 target — indistinguishable
+  from the untouched second robot. Reproduced cold, and present with both the
+  old and new heal guards, so it is not caused by either. Any intervening tool
+  call between the command and the step makes it apply correctly (-0.502), which
+  is why single-robot flows never show it. Not yet root-caused.
+
+- **Eight tools report success for input that did nothing (5.1, measured).**
+  `get_joint_positions` and `get_robot_info` on a nonexistent prim return
+  success with empty data; `delete_object` and `clone_object` report success for
+  a path that does not exist; `load_usd` reports success for a missing file;
+  `set_joint_positions` accepts a wrong-length array and an out-of-range joint
+  index; `create_object` accepts an unknown primitive type. The simulator stays
+  healthy throughout, so these are reporting defects rather than crashes — but
+  they are the same silent-success shape the rest of this changelog is about.
+  Prim-path validation and argument-length checks in the handlers would cover
+  most of them.
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
   steps (-0.399 / -2.000, stable through 1200) but oscillates indefinitely on
