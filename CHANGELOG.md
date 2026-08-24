@@ -314,6 +314,42 @@ up at all.
   to -0.402 against a -0.400 target (was: error, 0.000), and all articulation
   paths hold across three clear_scene cycles.
 
+### Fixed — Newton stepped a phantom scene after clear_scene
+
+- **Rigid bodies created after a `clear_scene` never simulated on Newton, and
+  step reported their spawn pose as fact.** Newton builds its model once and
+  rebuilds it from the timeline STOP event. The MCP debug loop is step-only and
+  never stops, so the model kept the *deleted* prims and never learned about the
+  new ones — and Newton went on stepping that phantom scene.
+
+  Found by driving the MCP tools directly rather than through the test suite,
+  which had always called `stop_simulation` before `clear_scene` and so never
+  hit it. Measured on 6.0.1-rc.7: `clear_scene` from a paused timeline, create a
+  sphere at z=2, `step_simulation(60)` — reported z=2.0 with zero velocity,
+  while `model.body_label` still read `['/World/Ball']` for a prim that no
+  longer existed. `sim_time` and the step counter advanced throughout (4468
+  steps, 74s of "simulation"), so nothing looked wrong from the outside. The
+  same sphere dropped after a `stop_simulation`, which does fire the rebuild,
+  landed correctly at z=0.149.
+
+  `step` now compares Newton's `body_label` against the stage's rigid bodies and
+  rebuilds the model when they diverge, reporting `newton_model_rebuilt` so the
+  rebuild is never silent. It runs only on Newton, only while the timeline is
+  stopped or paused, and leaves a latched failure (see the cone guard) alone —
+  rebuilding underneath a live scene is what cost this project a GPU-level
+  PhysX abort earlier.
+
+  The rebuild also re-primes physics afterwards: the play/pump/pause cycle that
+  drives Newton stepping invalidates the tensor view the rebuild leaves valid,
+  and without the re-prime the next joint read quietly degraded to the
+  drive-target fallback. That regression was caught by the `position_source`
+  tag added in the previous fix, which is precisely the job it exists to do.
+
+  Verified through the tools on Newton: a sphere dropped after clear_scene now
+  lands at z=0.149 with the rebuild disclosed, joint reads stay
+  `position_source: physics`, and smoke 19/19 / integration 43/43 hold. PhysX
+  and 5.1 are untouched by construction and re-verified at 19/19 and 43/43.
+
 ### Known issues
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150

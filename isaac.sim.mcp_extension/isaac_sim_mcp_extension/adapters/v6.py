@@ -877,6 +877,79 @@ class IsaacAdapterV6(IsaacAdapterBase):
             "Cube, or run this scene on the PhysX engine, which supports cones."
         )
 
+    def _newton_model_bodies(self):
+        """(NewtonStage, set of body paths in its model) or (None, None)."""
+        try:
+            import isaacsim.physics.newton as newton_ext
+
+            newton_stage = newton_ext.acquire_stage()
+        except Exception:
+            return None, None
+        if newton_stage is None:
+            return None, None
+        model = getattr(newton_stage, "model", None)
+        if model is None:
+            return newton_stage, None
+        try:
+            return newton_stage, {str(path) for path in (getattr(model, "body_label", []) or [])}
+        except Exception:
+            return newton_stage, None
+
+    def _refresh_newton_model_if_stale(self) -> bool:
+        """Rebuild Newton's model when it no longer matches the stage.
+
+        Newton builds its model once and rebuilds it from the timeline STOP
+        event. A step-only debug loop never stops, so after a clear_scene the
+        model keeps the *deleted* prims and never learns about the new ones —
+        and Newton keeps stepping that phantom scene. Measured on 6.0.1-rc.7
+        through the tools: clear_scene from a paused timeline, create a sphere
+        at z=2, step 60, and it reports z=2.0 with zero velocity while
+        model.body_label still reads ['/World/Ball'] for a prim that no longer
+        exists. sim_time and the step counter advance throughout, so nothing
+        looks wrong. The same sphere dropped after a stop_simulation — which
+        does fire the rebuild — lands correctly at z=0.149.
+
+        Only the stopped/paused case is handled: rebuilding underneath a running
+        scene is the kind of thing that cost this project a GPU-level PhysX
+        abort, and while playing Kit maintains the model itself.
+        """
+        if self._engine != "newton":
+            return False
+        try:
+            import omni.timeline
+
+            if omni.timeline.get_timeline_interface().is_playing():
+                return False
+        except Exception:
+            return False
+
+        newton_stage, model_bodies = self._newton_model_bodies()
+        if newton_stage is None:
+            return False
+        # Kit has not built a model yet, or a previous build failed and latched
+        # (see the cone guard) — leave both alone.
+        if not getattr(newton_stage, "initialized", False) or getattr(newton_stage, "_init_failed", False):
+            return False
+
+        try:
+            from pxr import UsdPhysics
+
+            stage_bodies = {
+                str(prim.GetPath()) for prim in self.get_stage().Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            }
+        except Exception:
+            return False
+
+        if model_bodies is not None and model_bodies == stage_bodies:
+            return False
+        try:
+            newton_stage.initialized = False
+            newton_stage.initialize_newton(None)
+        except Exception as exc:
+            print(f"_refresh_newton_model_if_stale: rebuild failed ({exc})")
+            return False
+        return not getattr(newton_stage, "_init_failed", False)
+
     def _arm_reset_point(self) -> None:
         """Give stop_simulation something to restore to, without running the sim.
 
@@ -1395,9 +1468,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # against -3.322 over the same fall).
         approximate = self._engine == "newton"
         suspended_graphs = []
+        rebuilt_model = False
         if approximate:
             import omni.kit.app
             import omni.timeline
+
+            rebuilt_model = self._refresh_newton_model_if_stale()
 
             timeline = omni.timeline.get_timeline_interface()
             resume_paused = not timeline.is_playing()
@@ -1424,7 +1500,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
         else:
             SimulationManager.step(steps=num_steps)
 
+        if rebuilt_model:
+            # The rebuild itself leaves the tensor view usable, but the
+            # play/pump/pause cycle above then invalidates it, so the next
+            # articulation read degrades to the drive-target fallback and
+            # reports the caller's own command back (caught by position_source
+            # during testing). Re-prime once so reads stay physics-backed.
+            try:
+                self._ensure_physics_world()
+            except Exception as exc:
+                print(f"step: could not re-prime physics after a Newton model rebuild ({exc})")
+
         result: Dict[str, Any] = {"stepped": num_steps}
+        if rebuilt_model:
+            result["newton_model_rebuilt"] = True
         if suspended_graphs:
             result["graphs_suspended"] = suspended_graphs
         if approximate:

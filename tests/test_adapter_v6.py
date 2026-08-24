@@ -1086,3 +1086,52 @@ def test_v6_allows_a_cone_with_an_articulation_under_physx(monkeypatch):
         [("/World/Cone", "Cone", False), ("/World/Arm", "Xform", True)],
     )
     adapter._guard_newton_unsupported_geometry()
+
+
+# Newton builds its model once and rebuilds it from the timeline STOP event. A
+# step-only debug loop never stops, so after a clear_scene the model keeps the
+# DELETED prims and never learns about the new ones — and Newton keeps stepping
+# that phantom scene. Measured on 6.0.1-rc.7 through the MCP tools: clear_scene
+# from a paused timeline, create a sphere at z=2, step 60, and step reports
+# z=2.0 with zero velocity while model.body_label still reads ['/World/Ball']
+# for a prim that no longer exists. sim_time and the step counter advance the
+# whole time, so nothing looks wrong. The same drop after a stop_simulation
+# lands correctly at z=0.149.
+def _v6_function_src(name):
+    import ast
+    import os
+
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "isaac.sim.mcp_extension", "isaac_sim_mcp_extension", "adapters", "v6.py"
+    )
+    with open(path) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node) or ""
+    return ""
+
+
+def test_v6_step_rebuilds_a_stale_newton_model():
+    src = _v6_function_src("step")
+    assert "_refresh_newton_model_if_stale" in src, "step must rebuild a Newton model that no longer matches the stage"
+
+
+def test_v6_newton_model_rebuild_is_newton_only_and_never_runs_while_playing():
+    """PhysX must not be touched, and a rebuild under a live scene is unsafe."""
+    src = _v6_function_src("_refresh_newton_model_if_stale")
+    assert src, "_refresh_newton_model_if_stale not found"
+    assert 'self._engine != "newton"' in src, "the rebuild must not touch PhysX"
+    assert "is_playing" in src, "a rebuild underneath a running scene is what aborts the GPU pipeline"
+    assert "_init_failed" in src, "a latched Newton failure (see the cone guard) must be left alone"
+
+
+def test_v6_step_reprimes_physics_after_a_newton_model_rebuild():
+    """The play/pump/pause cycle invalidates the tensor view the rebuild left valid.
+
+    Without this the next joint read degrades to the drive-target fallback and
+    echoes the caller's own command back — caught live by position_source.
+    """
+    src = _v6_function_src("step")
+    assert "_ensure_physics_world" in src, "step must re-prime physics after rebuilding the Newton model"
