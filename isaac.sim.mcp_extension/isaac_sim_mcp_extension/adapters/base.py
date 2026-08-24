@@ -438,6 +438,25 @@ class IsaacAdapterBase(ABC):
         scene.CreateGravityMagnitudeAttr().Set(magnitude)
         return True
 
+    # get_joint_positions falls back to USD drive targets when the physics view
+    # cannot serve a read. Those are the values set_joint_positions just wrote,
+    # so an unlabelled fallback hands the caller its own command back and it
+    # reads as a perfectly converged robot. That cost hours of this project's
+    # debugging: a Newton arm that was in fact oscillating between -0.70 and
+    # -4.07 rad reported exactly the commanded -0.400/-2.000, because every
+    # physics read was failing and the fallback answered instead. Whoever reads
+    # a joint position has to be able to tell a measurement from an echo.
+    JOINT_SOURCE_PHYSICS = "physics"
+    JOINT_SOURCE_DRIVE_TARGETS = "drive_targets"
+
+    def _note_joint_source(self, source: str) -> None:
+        self._joint_position_source = source
+
+    @property
+    def joint_position_source(self) -> str:
+        """Where the last get_joint_positions answer came from."""
+        return getattr(self, "_joint_position_source", self.JOINT_SOURCE_PHYSICS)
+
     def _stage_has_physics_scene(self) -> bool:
         """True when the stage carries at least one PhysicsScene prim."""
         try:

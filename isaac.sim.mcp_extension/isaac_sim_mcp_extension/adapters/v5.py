@@ -658,10 +658,14 @@ class IsaacAdapterV5(IsaacAdapterBase):
             # been rebuilt, so the same read is worth exactly one retry.
             positions = self._articulation_positions(prim_path)
         if positions is not None:
+            self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
             return positions
 
         # Fallback: read drive target positions from USD
-        # WARNING: these are authored targets, not actual physics positions
+        # WARNING: these are authored targets, not actual physics positions —
+        # they echo whatever set_joint_positions last wrote. Tagged so the
+        # caller is told, rather than mistaking a command for a measurement.
+        self._note_joint_source(self.JOINT_SOURCE_DRIVE_TARGETS)
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()

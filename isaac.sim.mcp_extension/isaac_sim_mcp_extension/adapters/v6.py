@@ -651,10 +651,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
             if positions is not None:
                 # batched (1, num_dofs) wp.array → flat list
                 arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
+                self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
                 return arr.reshape(-1).tolist()
         except Exception:
             pass
-        # USD fallback identical to V5
+        # USD fallback identical to V5: authored drive targets, which echo the
+        # last set_joint_positions call. Tagged so a command cannot pass for a
+        # measurement.
+        self._note_joint_source(self.JOINT_SOURCE_DRIVE_TARGETS)
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()

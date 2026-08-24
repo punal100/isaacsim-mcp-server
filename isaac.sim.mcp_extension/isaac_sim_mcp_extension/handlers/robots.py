@@ -225,6 +225,15 @@ def get_joints(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Di
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
         positions = adapter.get_joint_positions(prim_path)
-        return {"status": "success", "joint_positions": positions}
+        source = adapter.joint_position_source
+        result = {"status": "success", "joint_positions": positions, "position_source": source}
+        if source != adapter.JOINT_SOURCE_PHYSICS:
+            result["warning"] = (
+                "These are authored drive targets, not simulated positions — the physics view "
+                "could not serve this read, so the values echo the last set_joint_positions call. "
+                "A robot that looks perfectly converged here may not have moved at all. Check "
+                "get_isaac_logs, and confirm the timeline has been stepped."
+            )
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

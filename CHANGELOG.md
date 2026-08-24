@@ -271,21 +271,46 @@ up at all.
   `start_simulation()`/`fetch_results()`, so it must run only after a read has
   proven the view stale, and never while the timeline is live.
 
-### Known issues
-- **Joint drives do not converge on Newton with PhysX-tuned gains.** Commanding
-  the FR3 to j1=-0.4 / j3=-2.0 and stepping settles on PhysX in ~150 steps
-  (-0.399 / -2.000) but oscillates indefinitely on Newton: measured across 25.5s
-  of simulated time (1500 steps), j3 swung between -0.70 and -4.07 and never
-  settled, with stiffness 60000 / damping 6000 as shipped with the asset. The
-  stepping itself is sound — sim time advances 2.55s per 150 steps (60Hz) — so
-  this is a solver/gain difference, not a stepping bug, and it is left
-  untouched rather than papered over in the MCP layer. Re-tune the drive gains
-  for Newton, or debug motion on PhysX.
+### Fixed — a joint read now says whether it measured physics or echoed a command
 
-  Beware a measurement trap here: joint reads taken when Newton is not actually
-  simulating echo the commanded values back *exactly* (-0.400000004), which
-  reads as perfect convergence. Real convergence carries residual error
-  (PhysX: -0.399). Confirm `current_time` advanced before trusting a joint read.
+- **The USD drive-target fallback presented commands as measurements.** When
+  the physics view cannot serve a read, both adapters fall back to the authored
+  drive targets — precisely the values `set_joint_positions` just wrote — and
+  returned them unlabelled. A Newton arm that was in fact oscillating between
+  -0.70 and -4.07 rad therefore reported exactly the commanded -0.400 / -2.000,
+  which reads as a flawlessly converged robot. It cost this project hours of
+  chasing a convergence that was never happening, and it is the same silent
+  wrong answer the rest of this changelog is about.
+
+  `get_joint_positions` now reports `position_source` (`physics` or
+  `drive_targets`) and attaches an explicit warning when the answer is an echo.
+  Verified live on all three runtimes: a healthy read is tagged `physics` and
+  carries the real (oscillating, on Newton) values, while a read taken against
+  an invalidated tensor view is tagged `drive_targets` and returns the command
+  with the warning attached.
+
+  A zero-step read is the cheap discriminator when diagnosing by hand: physics
+  cannot have moved yet, so anything that already equals the target is an echo.
+
+### Known issues
+- **Joint drives do not converge on Newton, confirmed against instrumented
+  reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
+  steps (-0.399 / -2.000, stable through 1200) but oscillates indefinitely on
+  Newton: j3 swung between -0.70 and -4.07 across 20.4s of simulated time and
+  never settled.
+
+  Everything upstream of the solver checks out, so this is Newton's solver and
+  not the MCP layer: the commanded targets arrive intact
+  (`get_dof_position_targets` reads back `[0.0, -0.4, 0.0, -2.0, ...]`), the
+  tensor API serves the reads throughout, positions evolve from a genuine zero
+  start, sim time advances 2.55s per 150 steps (60Hz), and *both engines report
+  identical drive gains* (stiffness 3437746.75, damping 343774.69 — the
+  authored 60000/6000 scaled by 180/pi, on PhysX too). Scaling the gains down
+  57x on Newton stabilised j1 exactly on target but left j3 swinging, so softer
+  gains help without being a cure. Re-tune for Newton, or debug motion on PhysX.
+
+  Note `set_physics_params(time_step=...)` reports "Applied: nothing" on 6.0 —
+  the timestep remedy for a stiff drive is not reachable through that tool.
 
 - **Removing more than one RTX camera is unreliable, on both runtimes.** A
   single camera deletes cleanly and takes its render product with it (verified
