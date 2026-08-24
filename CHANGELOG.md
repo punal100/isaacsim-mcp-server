@@ -350,6 +350,47 @@ up at all.
   `position_source: physics`, and smoke 19/19 / integration 43/43 hold. PhysX
   and 5.1 are untouched by construction and re-verified at 19/19 and 43/43.
 
+### Fixed — release blockers found by the full three-runtime tool sweep
+
+- **PhysX joint reads echoed the caller's command after a step.** V5 and Newton
+  got a heal-and-retry for a stale physics view; V6/PhysX never did. Measured at
+  HEAD by sweeping all 42 tools: `set_joint_positions`, create a prim, `step`,
+  then read — and the read fell through to the USD drive targets and reported
+  the commanded `-0.4000` back as a measurement, while a dropped sphere in the
+  same scene proved physics was running. This is the default engine, and the
+  failure is invisible without `position_source`.
+
+  `get_joint_positions`, `set_joint_positions` and `_get_joint_names` on V6 now
+  rebuild the view once and retry, keeping their USD fallbacks for the
+  genuinely-unavailable case. On 6.0 `initialize_physics()` builds the views
+  itself but early-returns unless `_warmup_needed` is set — the flag Kit
+  otherwise only sets on a timeline STOP, which a step-only session never fires.
+  The refresh refuses while the timeline is live, the constraint that keeps
+  PhysX from aborting the GPU pipeline. Verified: the same check now reads
+  `source=physics j2=-0.4015` (a real value carrying residual error, not the
+  commanded -0.4000).
+
+- **`get_prim_info` reported a spawn pose as current on Newton.** Newton keeps
+  simulated poses in Fabric, not USD, so when the physics read failed the tool
+  silently returned the authored USD transform — measured at z=2.0 for a sphere
+  resting on the ground. It now heals once, and if the position still cannot
+  come from physics it is labelled `position_source: "usd"` with a warning,
+  for rigid bodies where the distinction matters.
+
+- **Wrong-but-plausible argument names silently did the wrong thing.** FastMCP
+  drops unknown keyword arguments rather than rejecting them, so
+  `create_material(material_path=...)` returned success while creating the
+  material at an auto-generated path, and the follow-up `apply_material` then
+  failed on a path that was never used. `create_material` now accepts
+  `material_path` as an alias for `prim_path`, and `reload_script` accepts
+  `script_file` as an alias for `file_path` (the name `create_action_graph`
+  uses for the same thing).
+
+  Release gate, all 42 tools driven through the MCP tools on each runtime, one
+  instance at a time: 5.1 29+13, 6.0 PhysX 29+13, 6.0 Newton 29+13 — 0 FAIL
+  everywhere, plus smoke 19/19 and integration 43/43 on each. The two EXT are
+  `search_usd` and `generate_3d`, which need API keys.
+
 ### Known issues
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150

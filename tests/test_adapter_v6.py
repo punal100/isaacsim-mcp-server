@@ -1135,3 +1135,36 @@ def test_v6_step_reprimes_physics_after_a_newton_model_rebuild():
     """
     src = _v6_function_src("step")
     assert "_ensure_physics_world" in src, "step must re-prime physics after rebuilding the Newton model"
+
+
+def test_v6_articulation_calls_heal_a_stale_physics_view():
+    """V6 needs the same heal-and-retry V5 got — PhysX was returning echoes.
+
+    Measured at HEAD on 6.0.1 PhysX before this: set_joint_positions, create a
+    prim, step, read — and the read fell through to the USD drive targets,
+    reporting the commanded -0.4000 back as a measurement while the dropped
+    sphere proved physics was running fine.
+    """
+    for name in ("get_joint_positions", "set_joint_positions", "_get_joint_names"):
+        src = _v6_function_src(name)
+        assert src, f"{name} not found"
+        assert "_try_articulation" in src, f"{name} must heal a stale physics view and retry once"
+
+
+def test_v6_physics_view_refresh_refuses_while_the_timeline_is_live():
+    src = _v6_function_src("_refresh_stale_physics_view")
+    assert src, "_refresh_stale_physics_view not found"
+    assert "is_playing" in src, "rebuilding under a running scene is what aborts the GPU pipeline"
+    assert "_warmup_needed" in src, "initialize_physics() early-returns unless the warmup flag is set"
+
+
+def test_v6_get_prim_transform_labels_a_usd_fallback_on_newton():
+    """Newton keeps simulated poses in Fabric, so an untagged USD read is a spawn pose.
+
+    Measured on 6.0.1: a sphere resting on the ground still read z=2.0 from USD
+    while get_prim_info reported it with no source at all.
+    """
+    src = _v6_function_src("get_prim_transform")
+    assert src, "get_prim_transform not found"
+    assert '"usd"' in src, "a USD-sourced position on Newton must say so"
+    assert "position_warning" in src, "the caller has to be told it may be the spawn pose"

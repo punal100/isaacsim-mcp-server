@@ -294,11 +294,34 @@ class IsaacAdapterV6(IsaacAdapterBase):
             raise ValueError(f"Prim not found: {prim_path}")
         transform = read_transform(UsdGeom.Xformable(prim))
         if self._engine == "newton":
-            simulated = self._simulated_position(prim_path)
-            if simulated is not None:
+            # Newton writes simulated poses to Fabric, not to USD, so the USD
+            # xform keeps reading the *spawn* pose no matter how far the body
+            # has moved. Reporting that unlabelled is the same silent wrong
+            # answer as the joint-read echo: measured on 6.0.1, a sphere resting
+            # on the ground still read z=2.0 from USD.
+            simulated, served = self._try_articulation(lambda: self._simulated_position(prim_path))
+            if served and simulated is not None:
                 transform["position"] = simulated
                 transform["position_source"] = "physics"
+            elif self._prim_is_rigid_body(prim):
+                # Only rigid bodies move under physics; for everything else USD
+                # is the authority and a tag would be noise.
+                transform["position_source"] = "usd"
+                transform["position_warning"] = (
+                    "Newton keeps simulated poses in Fabric, and this position could not be read from "
+                    "physics — it is the authored USD pose, which is the spawn pose for a body that has "
+                    "been simulated. Step the simulation and retry, or read the body through get_physics_state."
+                )
         return transform
+
+    @staticmethod
+    def _prim_is_rigid_body(prim) -> bool:
+        try:
+            from pxr import UsdPhysics
+
+            return bool(prim.HasAPI(UsdPhysics.RigidBodyAPI))
+        except Exception:
+            return False
 
     def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
         stage = self.get_stage()
@@ -573,7 +596,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
     ) -> None:
         import warp as wp
 
-        try:
+        def _apply():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
             positions_arr = wp.array(np.asarray([list(positions)], dtype=np.float32), dtype=wp.float32)
@@ -582,9 +605,11 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 art.set_dof_position_targets(positions_arr, indices=idx_arr)
             else:
                 art.set_dof_position_targets(positions_arr)
+            return True
+
+        _result, applied = self._try_articulation(_apply)
+        if applied:
             return
-        except Exception:
-            pass
         # USD-drive fallback (sim stopped / articulation not yet initialised)
         self._set_joint_drive_targets(prim_path, positions, joint_indices)
 
@@ -624,13 +649,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 drive.GetTargetPositionAttr().Set(float(value * 100.0))
 
     def _get_joint_names(self, prim_path: str) -> List[str]:
-        try:
+        def _names():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
-            if art.dof_names:
-                return list(art.dof_names)
-        except Exception:
-            pass
+            return list(art.dof_names) if art.dof_names else None
+
+        names, served = self._try_articulation(_names)
+        if served and names:
+            return names
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()
@@ -644,17 +670,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return names
 
     def get_joint_positions(self, prim_path: str) -> List[float]:
-        try:
+        def _read():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
             positions = art.get_dof_positions()
-            if positions is not None:
-                # batched (1, num_dofs) wp.array → flat list
-                arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
-                self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
-                return arr.reshape(-1).tolist()
-        except Exception:
-            pass
+            if positions is None:
+                raise RuntimeError("articulation returned no dof positions")
+            # batched (1, num_dofs) wp.array → flat list
+            arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
+            return arr.reshape(-1).tolist()
+
+        values, served = self._try_articulation(_read)
+        if served and values is not None:
+            self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
+            return values
         # USD fallback identical to V5: authored drive targets, which echo the
         # last set_joint_positions call. Tagged so a command cannot pass for a
         # measurement.
@@ -876,6 +905,67 @@ class IsaacAdapterV6(IsaacAdapterBase):
             "Delete the cone(s) and retry, replace them with Cylinder/Capsule/Sphere/"
             "Cube, or run this scene on the PhysX engine, which supports cones."
         )
+
+    def _refresh_stale_physics_view(self) -> bool:
+        """Rebuild the physics view after an articulation call found it stale.
+
+        The tensor view enumerates articulations when it is built, and Kit only
+        rebuilds it from the timeline STOP callback. The MCP debug loop is
+        step-only and never stops, so adding a prim after the view exists — or
+        clearing and rebuilding the scene — leaves reads and commands pointing
+        at a view that does not contain the robot. Measured at HEAD on 6.0.1
+        PhysX: set_joint_positions, create a prim, step, then read, and the read
+        fell through to the USD drive targets and reported the commanded
+        -0.4000 back as a measurement.
+
+        initialize_physics() builds the views itself on 6.0 (unlike 5.1, which
+        needs the warmup event), but it early-returns unless _warmup_needed is
+        set — the flag Kit otherwise only sets on STOP.
+
+        Refuses while the timeline is live: driving start_simulation() under a
+        running scene is what aborted the GPU pipeline earlier in this project.
+        """
+        try:
+            import omni.timeline
+
+            if omni.timeline.get_timeline_interface().is_playing():
+                return False
+            from isaacsim.core.simulation_manager import SimulationManager
+        except Exception:
+            return False
+        try:
+            for attr in ("_physics_sim_view", "_physics_sim_view__warp"):
+                view = getattr(SimulationManager, attr, None)
+                if view is not None:
+                    try:
+                        view.invalidate()
+                    except Exception:
+                        pass
+                    setattr(SimulationManager, attr, None)
+            SimulationManager._simulation_view_created = False
+            SimulationManager._warmup_needed = True
+            SimulationManager.initialize_physics()
+            return SimulationManager.get_physics_sim_view() is not None
+        except Exception as exc:
+            print(f"_refresh_stale_physics_view: could not rebuild the physics view ({exc})")
+            return False
+
+    def _try_articulation(self, operation):
+        """Run an articulation operation, healing a stale physics view once.
+
+        Returns (result, True) when it ran, (None, False) otherwise, so callers
+        keep their USD fallbacks for the genuinely-unavailable case.
+        """
+        try:
+            return operation(), True
+        except Exception:
+            pass
+        if self._refresh_stale_physics_view():
+            try:
+                return operation(), True
+            except Exception:
+                pass
+        return None, False
 
     def _newton_model_bodies(self):
         """(NewtonStage, set of body paths in its model) or (None, None)."""
