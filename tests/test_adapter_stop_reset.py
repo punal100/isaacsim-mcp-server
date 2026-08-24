@@ -290,3 +290,26 @@ def test_v5_view_refresh_refuses_while_the_timeline_is_live():
     assert "world.initialize_physics" not in src.lower().replace(" ", ""), (
         "World.initialize_physics() calls play() and would start the timeline under a step-only session"
     )
+
+
+def test_v5_commands_heal_a_stale_view_instead_of_vanishing():
+    """A joint command has no fallback that can move a robot — it must retry.
+
+    Reads degrade to USD values when the physics view is stale, but a command
+    written to a view that does not contain the robot simply does nothing.
+    Measured on 5.1: commanding joints without a prior read (which is what
+    heals the view) left the arm at 0.000 after 120 steps against a target of
+    -0.400, and set_joint_positions reported an error.
+    """
+    for name in ("set_joint_positions", "_get_joint_names", "get_robot_joint_info"):
+        src = _v5_function_src(name)
+        assert src, f"{name} not found"
+        assert "_try_articulation" in src, f"{name} must heal a stale physics view and retry once"
+
+
+def test_v5_articulation_retry_goes_through_the_guarded_refresh():
+    """The retry must inherit the crash-safety guard, not re-implement it."""
+    src = _v5_function_src("_try_articulation")
+    assert src, "_try_articulation not found"
+    assert "_refresh_stale_physics_view" in src, "the retry must use the guarded refresh"
+    assert "initialize_physics" not in src, "the helper must not drive physics init directly"

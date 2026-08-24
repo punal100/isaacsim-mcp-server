@@ -292,6 +292,28 @@ up at all.
   A zero-step read is the cheap discriminator when diagnosing by hand: physics
   cannot have moved yet, so anything that already equals the target is an echo.
 
+### Fixed — joint commands silently did nothing on a stale physics view (V5)
+
+- **A command has no fallback that can move a robot.** The previous fix healed
+  the stale physics view from the *read* path only, which was enough whenever a
+  session happened to read joints before commanding them — the heal is shared,
+  so everything afterwards worked. Command first, as an agent reasonably might,
+  and there was nothing to heal it: measured on 5.1, `set_joint_positions`
+  after a second `clear_scene` reported an error and left the arm at 0.000
+  through 120 steps against a target of -0.400, because the robot was not in
+  the simulation at all. Reads degrade to USD values in that state; a command
+  simply evaporates.
+
+  `set_joint_positions`, `_get_joint_names` and `get_robot_joint_info` now go
+  through a shared `_try_articulation` helper that rebuilds the view once and
+  retries, keeping their USD fallbacks for the genuinely-unavailable case. The
+  retry reuses the guarded refresh, so it stays inert while the timeline is
+  live — the constraint that keeps PhysX from aborting on the GPU.
+
+  Verified cold on 5.1: command-first now reports success and drives the joint
+  to -0.402 against a -0.400 target (was: error, 0.000), and all articulation
+  paths hold across three clear_scene cycles.
+
 ### Known issues
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150

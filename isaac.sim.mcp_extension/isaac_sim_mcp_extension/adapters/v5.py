@@ -496,13 +496,15 @@ class IsaacAdapterV5(IsaacAdapterBase):
         # Try to get joint info via articulation API (requires running sim)
         joint_names: List[str] = []
         num_dof = 0
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+
+        def _info():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
-            joint_names = list(art.dof_names) if art.dof_names else []
-            num_dof = art.num_dof if art.num_dof else 0
-        except Exception:
-            pass
+            return (list(art.dof_names) if art.dof_names else [], art.num_dof if art.num_dof else 0)
+
+        info, ok = self._try_articulation(_info)
+        if ok and info:
+            joint_names, num_dof = info
 
         # Fallback: discover joints by traversing USD stage
         stage = self.get_stage()
@@ -554,16 +556,18 @@ class IsaacAdapterV5(IsaacAdapterBase):
         from isaacsim.core.prims import SingleArticulation
         from isaacsim.core.utils.types import ArticulationAction
 
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+        def _apply():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
             action = ArticulationAction(
                 joint_positions=np.array(positions),
                 joint_indices=np.array(joint_indices) if joint_indices else None,
             )
-            controller = art.get_articulation_controller()
-            controller.apply_action(action)
-        except Exception:
+            art.get_articulation_controller().apply_action(action)
+            return True
+
+        _result, applied = self._try_articulation(_apply)
+        if not applied:
             # Fallback: set USD drive targets directly (works when sim is stopped)
             self._set_joint_drive_targets(prim_path, positions, joint_indices)
 
@@ -612,13 +616,15 @@ class IsaacAdapterV5(IsaacAdapterBase):
         from isaacsim.core.prims import SingleArticulation
 
         self._ensure_physics_world()
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+
+        def _names():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
-            if art.dof_names:
-                return list(art.dof_names)
-        except Exception:
-            pass
+            return list(art.dof_names) if art.dof_names else None
+
+        names_from_physics, ok = self._try_articulation(_names)
+        if ok and names_from_physics:
+            return names_from_physics
 
         # Fallback: traverse USD
         from pxr import Usd, UsdPhysics
@@ -633,6 +639,33 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 names.append(desc.GetName())
         return names
 
+    def _try_articulation(self, operation):
+        """Run an articulation operation, healing a stale physics view once.
+
+        Every articulation entry point hits the same wall: the view is rebuilt
+        only by Kit's timeline STOP callback, which a step-only session never
+        fires, so anything created after the view was built is invisible to it.
+        Reads degrade to USD fallbacks (see get_joint_positions), but a *command*
+        has nowhere to degrade to — measured on 5.1, commanding joints without a
+        prior read left the arm at 0.000 after 120 steps against a target of
+        -0.400, because the robot was not in the simulation at all.
+
+        Returns (result, True) when the operation ran, (None, False) otherwise,
+        so callers keep their own USD fallbacks for the genuinely-unavailable
+        case. The refresh declines while the timeline is live, so this is inert
+        during a play run.
+        """
+        try:
+            return operation(), True
+        except Exception:
+            pass
+        if self._refresh_stale_physics_view():
+            try:
+                return operation(), True
+            except Exception:
+                pass
+        return None, False
+
     def _articulation_positions(self, prim_path: str) -> Optional[List[float]]:
         """Joint positions from the physics view, or None when it cannot serve them."""
         from isaacsim.core.prims import SingleArticulation
@@ -646,6 +679,9 @@ class IsaacAdapterV5(IsaacAdapterBase):
         except Exception:
             return None
         return None
+
+    # NOTE: get_joint_positions drives the retry itself so it can tag
+    # position_source on the fallback; the helper covers everything else.
 
     def get_joint_positions(self, prim_path: str) -> List[float]:
 
