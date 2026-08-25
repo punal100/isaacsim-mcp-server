@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, Sequence
 
 from isaac_sim_mcp_extension.gen3d import Beaver3d
@@ -77,9 +78,20 @@ def load_usd(
     try:
         if not usd_url:
             return {"status": "error", "message": "usd_url is required"}
+        # A local path that does not exist produced a reference to nothing and
+        # still reported "Loaded USD from ...". Check before, and verify after.
+        if "://" not in usd_url and not os.path.isfile(usd_url):
+            return {"status": "error", "message": f"USD file not found: {usd_url}"}
         loader = USDLoader()
         result_path = loader.load_usd_from_url(url_path=usd_url, target_path=prim_path, location=position, scale=scale)
-        return {"status": "success", "message": f"Loaded USD from {usd_url}", "prim_path": result_path}
+        landed = result_path or prim_path
+        try:
+            prim = adapter.get_stage().GetPrimAtPath(landed)
+            if not (prim and prim.IsValid()):
+                return {"status": "error", "message": f"Loading {usd_url} produced no prim at {landed}"}
+        except Exception:
+            pass
+        return {"status": "success", "message": f"Loaded USD from {usd_url}", "prim_path": landed}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

@@ -50,6 +50,50 @@ _USD_DEFAULT_SIZE_M: Dict[str, float] = {
 _CANONICAL_PRIM_TYPES: Dict[str, str] = {name.lower(): name for name in _USD_DEFAULT_SIZE_M}
 
 
+def _unregistered_type(adapter: IsaacAdapterBase, prim_path: str):
+    """The authored type name when USD has no schema for it, else None.
+
+    USD does not reject an unknown type name — it authors the prim with that
+    name and no schema behind it, so create_object(object_type="NotAShape")
+    reported "Created NotAShape" for something that never renders or collides.
+    Measured on 5.1: the bogus prim reads authored='NotAShape' schema='' while a
+    real one reads authored='Cube' schema='Cube'. Returns None whenever the
+    answer cannot be read, so only a definite mismatch is ever rejected.
+    """
+    try:
+        prim = adapter.get_stage().GetPrimAtPath(prim_path)
+        if not (prim and prim.IsValid()):
+            return None
+        authored = prim.GetTypeName()
+        schema = prim.GetPrimTypeInfo().GetSchemaTypeName()
+    except Exception:
+        return None
+    try:
+        authored_s, schema_s = str(authored), str(schema)
+    except Exception:
+        return None
+    # A stubbed/mocked stage yields non-empty placeholder text for both; only
+    # a real, empty schema name means USD did not recognise the type.
+    if authored_s and not schema_s:
+        return authored_s
+    return None
+
+
+def prim_missing(adapter: IsaacAdapterBase, prim_path: str) -> bool:
+    """True when prim_path is not on the stage.
+
+    Handlers that act on a prim have to check this themselves: the adapters
+    answer a missing prim with empty data rather than an exception, so an
+    unchecked handler reports success for a path that was never there — a typo
+    in a prim path came back as {"status": "success"} with nothing done.
+    """
+    try:
+        prim = adapter.get_stage().GetPrimAtPath(prim_path)
+    except Exception:
+        return False  # cannot tell; let the operation speak for itself
+    return not (prim and prim.IsValid())
+
+
 def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["objects.create"] = lambda **p: create(adapter, **p)
     registry["objects.delete"] = lambda **p: delete(adapter, **p)
@@ -77,6 +121,25 @@ def create(
             count = len(list(stage.TraverseAll()))
             prim_path = f"/World/{object_type}_{count}"
         _prim = adapter.create_prim(prim_path, prim_type=object_type)
+
+        # USD does not reject an unknown type name — it authors a *typeless*
+        # prim, so create_object(object_type="NotAShape") reported
+        # "Created NotAShape" for something that never renders or collides.
+        # Types outside _CANONICAL_PRIM_TYPES are still allowed (Xform and
+        # friends are legitimate); the test is whether USD kept the type.
+        created_type = _unregistered_type(adapter, prim_path)
+        if created_type is not None:
+            try:
+                adapter.delete_prim(prim_path)
+            except Exception:
+                pass
+            return {
+                "status": "error",
+                "message": (
+                    f"USD has no schema for object_type {object_type!r}, so the prim would render "
+                    f"and collide as nothing. Geometric options: " + ", ".join(sorted(_CANONICAL_PRIM_TYPES.values()))
+                ),
+            }
 
         # When no scale was given, derive one from `size` (default 1m) so the
         # object comes out at a sane size relative to a typical robot. If the
@@ -118,6 +181,11 @@ def delete(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict[s
     try:
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
+        # Deleting something that was never there used to report success — the
+        # post-delete "is it gone?" check below is trivially true for a path
+        # that never existed, so a typo read as a successful delete.
+        if prim_missing(adapter, prim_path):
+            return {"status": "error", "message": f"Prim not found: {prim_path}"}
         adapter.delete_prim(prim_path)
 
         # Confirm it actually went, so an immediate failure is not reported as
@@ -175,7 +243,13 @@ def clone(
     try:
         if not source_path or not target_path:
             return {"status": "error", "message": "source_path and target_path are required"}
+        if prim_missing(adapter, source_path):
+            return {"status": "error", "message": f"Source prim not found: {source_path}"}
         adapter.clone_prim(source_path, target_path)
+        # CopyPrim does not raise for a source it cannot copy, so confirm the
+        # clone is actually on the stage before calling it a success.
+        if prim_missing(adapter, target_path):
+            return {"status": "error", "message": f"Clone produced no prim at {target_path}"}
         if position:
             adapter.set_prim_transform(target_path, position=position)
         return {"status": "success", "message": f"Cloned {source_path} to {target_path}"}

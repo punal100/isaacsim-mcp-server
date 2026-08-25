@@ -401,7 +401,40 @@ up at all.
   physics-backed (8 of 9). It still refuses while the timeline is live, the
   constraint that keeps PhysX from aborting the GPU pipeline.
 
+### Fixed — eight tools reported success for input that did nothing
+
+Found by testing the error and edge-case arguments previously disclosed as
+untested. Each returned `{"status": "success"}` for a call that changed nothing,
+so a typo'd prim path or a wrong-length array read as a completed operation:
+
+- `get_joint_positions` and `get_robot_info` answered a nonexistent prim with
+  success and empty data — the adapters return `[]` rather than raising.
+- `delete_object` reported "Deleted /World/Nope" for a path that never existed:
+  its post-delete "is it gone?" check is trivially true for a missing prim.
+- `clone_object` reported a successful clone from a source that does not exist;
+  `CopyPrim` does not raise.
+- `load_usd` reported "Loaded USD from ..." for a missing file.
+- `set_joint_positions` accepted a 2-value array for a 9-DOF arm, and a joint
+  index of 999, reporting success while the robot did not move.
+- `create_object` accepted `object_type="NotAShape"`. USD does not reject an
+  unknown type name — it authors the prim with that name and no schema behind
+  it, so the result renders and collides as nothing. Measured: the bogus prim
+  reads `authored='NotAShape' schema=''` where a real one reads
+  `authored='Cube' schema='Cube'`, and that is now the test. Types outside the
+  geometric set are still allowed, since `Xform` and friends are legitimate.
+
+The handlers now validate the prim exists, the array lengths agree, the indices
+are in range, and that what was created or loaded actually landed on the stage.
+Verified on device: the edge suite goes 15/23 to 23/23 on 5.1 and 23/23 on 6.0
+PhysX, with the full gate still clean on all three runtimes.
+
 ### Known issues
+- **`step_simulation` with a negative count behaves differently per runtime.**
+  5.1 accepts it and reports "Stepped -5 frames"; Newton rejects it. After that
+  rejection on Newton, the next `step_simulation` returned no `prim_states` for
+  a freshly created prim, though the simulator was otherwise healthy and the
+  following sweep stepped the same drop correctly. Guard the argument caller-side
+  until this is normalised.
 - **Commanding one of several robots can be silently dropped (5.1).** With two
   articulations on the stage, `set_joint_positions` on the first reports success
   and the arm then only sags to -0.024 against a -0.5 target — indistinguishable
@@ -410,16 +443,6 @@ up at all.
   call between the command and the step makes it apply correctly (-0.502), which
   is why single-robot flows never show it. Not yet root-caused.
 
-- **Eight tools report success for input that did nothing (5.1, measured).**
-  `get_joint_positions` and `get_robot_info` on a nonexistent prim return
-  success with empty data; `delete_object` and `clone_object` report success for
-  a path that does not exist; `load_usd` reports success for a missing file;
-  `set_joint_positions` accepts a wrong-length array and an out-of-range joint
-  index; `create_object` accepts an unknown primitive type. The simulator stays
-  healthy throughout, so these are reporting defects rather than crashes — but
-  they are the same silent-success shape the rest of this changelog is about.
-  Prim-path validation and argument-length checks in the handlers would cover
-  most of them.
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
   steps (-0.399 / -2.000, stable through 1200) but oscillates indefinitely on

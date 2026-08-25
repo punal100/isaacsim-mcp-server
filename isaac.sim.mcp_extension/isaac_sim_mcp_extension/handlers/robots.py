@@ -29,6 +29,7 @@ import traceback
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..adapters.base import IsaacAdapterBase
+from .objects import prim_missing
 
 # Hardcoded fallback — used only if live discovery fails.
 # Keys are lowercase robot names, asset_path is relative to the assets root.
@@ -199,6 +200,8 @@ def get_info(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict
     try:
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
+        if prim_missing(adapter, prim_path):
+            return {"status": "error", "message": f"Prim not found: {prim_path}"}
         info = adapter.get_robot_joint_info(prim_path)
         return {"status": "success", **info}
     except Exception as e:
@@ -214,6 +217,35 @@ def set_joints(
     try:
         if not prim_path or joint_positions is None:
             return {"status": "error", "message": "prim_path and joint_positions are required"}
+        if prim_missing(adapter, prim_path):
+            return {"status": "error", "message": f"Prim not found: {prim_path}"}
+
+        # Neither the adapters nor the physics API complain about a
+        # wrong-length array or an out-of-range index — the call reported
+        # success and the robot did not move, or moved the wrong joint.
+        dof = len(adapter.get_joint_positions(prim_path) or [])
+        if joint_indices is not None:
+            if len(joint_positions) != len(joint_indices):
+                return {
+                    "status": "error",
+                    "message": (
+                        f"joint_positions has {len(joint_positions)} value(s) but joint_indices has "
+                        f"{len(joint_indices)}; they must match."
+                    ),
+                }
+            if dof and any((i < 0 or i >= dof) for i in joint_indices):
+                return {
+                    "status": "error",
+                    "message": f"joint_indices out of range for {prim_path}: valid indices are 0..{dof - 1}.",
+                }
+        elif dof and len(joint_positions) != dof:
+            return {
+                "status": "error",
+                "message": (
+                    f"{prim_path} has {dof} DOF but {len(joint_positions)} position(s) were given. "
+                    "Pass one value per joint, or use joint_indices to address a subset."
+                ),
+            }
         adapter.set_joint_positions(prim_path, joint_positions, joint_indices)
         return {"status": "success", "message": f"Set joint positions on {prim_path}"}
     except Exception as e:
@@ -224,6 +256,10 @@ def get_joints(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Di
     try:
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
+        # A missing prim answers with an empty list rather than raising, which
+        # used to be reported as a successful read of a robot with no joints.
+        if prim_missing(adapter, prim_path):
+            return {"status": "error", "message": f"Prim not found: {prim_path}"}
         positions = adapter.get_joint_positions(prim_path)
         source = adapter.joint_position_source
         result = {"status": "success", "joint_positions": positions, "position_source": source}
