@@ -80,6 +80,37 @@ def create_physics(
         gp = stage.GetPrimAtPath(floor_path)
         if gp.IsValid() and not gp.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI.Apply(gp)
+
+        # Bring physics up NOW, while the stage still holds no articulation.
+        #
+        # PhysX corrupts its GPU pipeline if the simulation is first set up
+        # with an articulation already on the stage and another is added
+        # afterwards: the next start dies with "PhysX Internal CUDA error.
+        # Simulation cannot continue! Error code 700", followed by one
+        # "PhysX ABORT ... because of previous CUDA errors" per stepped frame.
+        # The simulator keeps answering and step_simulation still reports
+        # success, but physics is dead — a dropped sphere stays at its spawn
+        # height and joint reads come back as garbage (-431602080.0 measured
+        # on 6.0.1).
+        #
+        # Nothing else set up physics before the first robot, because
+        # _ensure_physics_world is reached from create_robot's joint report —
+        # i.e. one reference too late. Measured on 6.0.1-rc.7, cold-booted per
+        # trial, two FR3s through the tools: initialise before either robot and
+        # 150 steps run clean; initialise after the first and the second robot
+        # brings 149 aborts. Stock Isaac Sim with the same two robots is clean
+        # either way, and one robot alone never trips it, which is why every
+        # single-robot flow missed this.
+        #
+        # PhysX only. Newton has no such fault (0 CUDA errors in every trial),
+        # and priming it here actively breaks it: Newton builds its model when
+        # physics comes up, so a model built on the empty scene left a
+        # rigid-body-only stage frozen — a sphere dropped from z=2 stayed at
+        # 2.000 where it had landed at 0.149, even though step reported the
+        # rebuild. Scenes containing a robot were unaffected, which is exactly
+        # the kind of partial break that ships unnoticed.
+        if getattr(adapter, "_engine", "physx") != "newton":
+            adapter._ensure_physics_world()
         return {"status": "success", "message": f"Physics scene created at {scene_path}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}

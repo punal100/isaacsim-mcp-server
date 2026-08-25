@@ -849,27 +849,64 @@ class IsaacAdapterV6(IsaacAdapterBase):
     # and a dead simulator.
     NEWTON_UNSUPPORTED_TYPES = ("Cone",)
 
+    # Newton's model builder also refuses a non-plane shape whose size is zero
+    # ("Only plane shapes are allowed to have a size of zero"), and that failure
+    # latches _init_failed exactly like the cone one does — same permanent kill,
+    # same restart-only recovery. Found by the edge suite, which creates a
+    # size=0 Cube: every later check reported a dead simulator.
+    NEWTON_SIZE_ATTRS = {
+        "Cube": ("size",),
+        "Sphere": ("radius",),
+        "Cylinder": ("radius", "height"),
+        "Cone": ("radius", "height"),
+        "Capsule": ("radius", "height"),
+    }
+
+    def _newton_zero_sized(self, prim) -> bool:
+        """True when this prim is a non-plane shape collapsed to zero size."""
+        attrs = self.NEWTON_SIZE_ATTRS.get(str(prim.GetTypeName()))
+        if not attrs:
+            return False
+        for name in attrs:
+            try:
+                attr = prim.GetAttribute(name)
+                if attr and attr.HasAuthoredValue() and float(attr.Get()) == 0.0:
+                    return True
+            except Exception:
+                continue
+        # A non-zero shape scaled flat reaches the solver the same way.
+        try:
+            scale = prim.GetAttribute("xformOp:scale")
+            value = scale.Get() if scale else None
+            if value is not None and any(float(c) == 0.0 for c in value):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _newton_unsupported_geometry(self) -> list:
-        """Cone prims that would brick Newton once an articulation is present."""
+        """(path, reason) for prims that would brick Newton once an articulation exists."""
         try:
             stage = self.get_stage()
         except Exception:
             return []
         if stage is None:
             return []
-        cones, has_articulation = [], False
+        blockers, has_articulation = [], False
         try:
             from pxr import UsdPhysics
 
             articulation_api = getattr(UsdPhysics, "ArticulationRootAPI", None)
             for prim in stage.Traverse():
                 if prim.GetTypeName() in self.NEWTON_UNSUPPORTED_TYPES:
-                    cones.append(str(prim.GetPath()))
+                    blockers.append((str(prim.GetPath()), "cone geometry"))
+                elif self._newton_zero_sized(prim):
+                    blockers.append((str(prim.GetPath()), "zero size"))
                 elif not has_articulation and self._is_articulation(prim, articulation_api):
                     has_articulation = True
         except Exception:
             return []
-        return cones if (cones and has_articulation) else []
+        return blockers if (blockers and has_articulation) else []
 
     @staticmethod
     def _is_articulation(prim, articulation_api) -> bool:
@@ -896,14 +933,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
         blockers = self._newton_unsupported_geometry()
         if not blockers:
             return
-        shown = ", ".join(blockers[:5]) + (" …" if len(blockers) > 5 else "")
+        shown = ", ".join(f"{path} ({reason})" for path, reason in blockers[:5])
+        if len(blockers) > 5:
+            shown += " …"
         raise RuntimeError(
-            "Newton cannot simulate Cone geometry together with an articulated "
-            f"robot — its MuJoCo solver has no cone shape. Offending prims: {shown}. "
-            "Initialising anyway would permanently disable physics for this Isaac "
-            "Sim session (only a restart recovers it), so the command was refused. "
-            "Delete the cone(s) and retry, replace them with Cylinder/Capsule/Sphere/"
-            "Cube, or run this scene on the PhysX engine, which supports cones."
+            "Newton cannot simulate this geometry together with an articulated robot: "
+            f"{shown}. Its MuJoCo solver has no cone shape, and rejects any non-plane "
+            "shape whose size is zero. Initialising anyway would permanently disable "
+            "physics for this Isaac Sim session (only a restart recovers it), so the "
+            "command was refused. Delete or resize the offending prim(s) — replace a "
+            "cone with Cylinder/Capsule/Sphere/Cube, give a zero-sized shape a real "
+            "size — or run this scene on the PhysX engine, which accepts both."
         )
 
     def _refresh_stale_physics_view(self) -> bool:
@@ -1032,6 +1072,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
         if model_bodies is not None and model_bodies == stage_bodies:
             return False
+        # Same refusal as _ensure_physics_world: this rebuild calls
+        # initialize_newton() directly, so without the guard a cone or a
+        # zero-sized shape latches physics dead here instead — measured on
+        # 6.0.1-rc.7, where a size=0 Cube killed the simulator through this
+        # path while the guard on the other path never saw it.
+        self._guard_newton_unsupported_geometry()
         try:
             newton_stage.initialized = False
             newton_stage.initialize_newton(None)

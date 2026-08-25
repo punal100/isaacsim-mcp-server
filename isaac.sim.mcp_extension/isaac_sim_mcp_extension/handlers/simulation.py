@@ -77,6 +77,25 @@ def step(
     observe_joints: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     try:
+        # num_steps reached three different code paths unvalidated and each did
+        # something else with a negative count: V5 and Newton run
+        # `for _ in range(num_steps)`, which is an empty loop, so the tool
+        # reported "Stepped -5 frames" for a call that advanced nothing, while
+        # V6/PhysX handed it to SimulationManager.step and errored. Neither is
+        # an answer to "step backwards", which no engine supports.
+        try:
+            num_steps = int(num_steps)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": f"num_steps must be an integer, got {num_steps!r}."}
+        if num_steps < 1:
+            return {
+                "status": "error",
+                "message": (
+                    f"num_steps must be 1 or more, got {num_steps}. Physics cannot be stepped "
+                    "backwards; call stop_simulation to return to the spawn state."
+                ),
+            }
+
         # Fail loud: stepping is only valid on a frozen (paused/stopped)
         # timeline. If a free run is active, N frames cannot be counted
         # exactly, so refuse rather than silently race the play loop.

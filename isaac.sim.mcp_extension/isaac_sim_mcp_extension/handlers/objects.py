@@ -116,6 +116,20 @@ def create(
         # Normalise to the canonical USD type name so non-canonical casing
         # ("cube") still creates real geometry instead of a typeless prim.
         object_type = _CANONICAL_PRIM_TYPES.get(object_type.lower(), object_type)
+
+        # size becomes a scale factor below, so size<=0 authors a prim scaled to
+        # zero (or mirrored): it renders and collides as nothing, exactly like
+        # the unknown-type case handled further down. On Newton it is worse than
+        # useless — the MuJoCo model builder refuses any non-plane shape of zero
+        # size and latches physics dead for the rest of the session.
+        if size is not None and size <= 0:
+            return {
+                "status": "error",
+                "message": (
+                    f"size must be greater than 0 (got {size}); a zero or negative size scales the "
+                    "prim to nothing, so it would render and collide as nothing."
+                ),
+            }
         if not prim_path:
             stage = adapter.get_stage()
             count = len(list(stage.TraverseAll()))

@@ -428,20 +428,94 @@ are in range, and that what was created or loaded actually landed on the stage.
 Verified on device: the edge suite goes 15/23 to 23/23 on 5.1 and 23/23 on 6.0
 PhysX, with the full gate still clean on all three runtimes.
 
+### Fixed — two robots corrupted PhysX's GPU pipeline and killed physics
+
+- **A second articulation faulted PhysX's CUDA context, and every tool kept
+  reporting success.** Creating two robots through the tools and stepping died
+  with `PhysX error: PhysX Internal CUDA error. Simulation cannot continue!
+  Error code 700`, followed by one `PhysX ABORT error: PhysX cannot start GPU
+  simulation because of previous CUDA errors` per stepped frame — 149 of them
+  in a 150-frame call, which `SimulationManager.step` swallows whole. Nothing
+  in the MCP response changed: `step_simulation` returned `status: success`
+  with a frame count, on a simulator whose physics was dead.
+
+  What the caller saw instead: on 6.0.1 a joint read came back as
+  `-431602080.0` (freed GPU memory read as a float) and a dropped body never
+  moved; on 5.1 the arm sagged to -0.024 against a -0.5 target and the socket
+  then stopped answering, wedging the session. This is the "commanding one of
+  several robots is silently dropped" entry from the previous known-issues
+  list — it was never a command-routing bug, the command was applied correctly
+  and PhysX then reset its CUDA context underneath it.
+
+  *Root cause.* Physics was first initialised with one articulation already on
+  the stage. `_ensure_physics_world` is reached from `create_robot`'s joint
+  report, so the first robot brings physics up and the second arrives into an
+  already-built GPU pipeline; the next start faults. `create_physics_scene` now
+  primes physics while the stage still holds no articulation.
+
+  *Measured, cold-booted per trial, one instance at a time, GUI:* prime before
+  either robot and 150 steps run clean on both 5.1 and 6.0; prime after the
+  first and the second robot brings 149 aborts, deterministically. One robot
+  alone never trips it, which is why every single-robot flow missed it. Stock
+  Isaac Sim is unaffected — 1, 2 and 3 FR3s play cleanly headless under both
+  `timeline.play()` and `SimulationManager.step`, and the same scene built
+  inside the running extension via `execute_script` is clean too — so this was
+  ours, not the GPU (RTX 3090, 3.8 GB of 24 GB in use), the driver, the
+  renderer (`--no-window` faults identically) or a timing race (a 2 s delay
+  does not help).
+
+  Priming is PhysX-only. Newton never faulted in any trial, and priming it
+  early actively breaks it: Newton builds its model when physics comes up, so a
+  model built on the empty scene left a rigid-body-only stage frozen — a sphere
+  dropped from z=2 stayed at 2.000 where it lands at 0.149. Scenes containing a
+  robot were unaffected, which is the kind of partial break that ships
+  unnoticed; it is now covered by a test.
+
+  Verified after the fix on all three runtimes: the multi-robot suite goes 8/9
+  to **9/9 on 5.1** and passes **9/9 on 6.0 PhysX** for the first time, with
+  zero CUDA errors and zero aborts in every log.
+
+### Fixed — a zero-sized shape permanently disabled Newton
+
+- **`create_object(size=0)` killed the simulator for the rest of the session.**
+  `size` is applied as a scale factor, so `size<=0` authors a prim scaled to
+  nothing. Newton's MuJoCo model builder refuses it — `Only plane shapes are
+  allowed to have a size of zero` — and Isaac latches
+  `NewtonStage._init_failed`, exactly the permanent kill the cone guard already
+  exists to prevent. Only a restart recovered it.
+
+  Two holes, both closed. `create_object` now rejects a size that cannot
+  produce a usable prim, the same reasoning that already rejects an unknown
+  `object_type`: it would render and collide as nothing. And
+  `_refresh_newton_model_if_stale` — added with the phantom-scene fix — calls
+  `initialize_newton()` directly and so bypassed the guard entirely, which is
+  how the cone guard could be in place while a zero-sized cube still latched
+  physics through the other path. The guard now runs there too, and covers
+  zero-sized shapes as well as cones, naming the offending prim and the reason.
+
+  Verified on Newton: the edge suite no longer latches the simulator
+  (`Initialization failed` 0 occurrences, was 1) and `prim_states` come back
+  populated where the suite previously read nothing at all.
+
+### Fixed — step_simulation accepted a negative frame count
+
+- `num_steps` reached three code paths unvalidated and each did something
+  different: V5 and Newton run `for _ in range(num_steps)`, an empty loop, so
+  the tool answered `"Stepped -5 frames"` for a call that advanced no physics;
+  V6/PhysX passed it to `SimulationManager.step` and errored. Neither answers
+  "step backwards", which no engine supports. The handler now requires an
+  integer of 1 or more and says so, pointing at `stop_simulation` for returning
+  to the spawn state.
+
 ### Known issues
-- **`step_simulation` with a negative count behaves differently per runtime.**
-  5.1 accepts it and reports "Stepped -5 frames"; Newton rejects it. After that
-  rejection on Newton, the next `step_simulation` returned no `prim_states` for
-  a freshly created prim, though the simulator was otherwise healthy and the
-  following sweep stepped the same drop correctly. Guard the argument caller-side
-  until this is normalised.
-- **Commanding one of several robots can be silently dropped (5.1).** With two
-  articulations on the stage, `set_joint_positions` on the first reports success
-  and the arm then only sags to -0.024 against a -0.5 target — indistinguishable
-  from the untouched second robot. Reproduced cold, and present with both the
-  old and new heal guards, so it is not caused by either. Any intervening tool
-  call between the command and the step makes it apply correctly (-0.502), which
-  is why single-robot flows never show it. Not yet root-caused.
+- **Newton stepping degrades after a run of refused calls.** On Newton only,
+  after the edge suite drives ~20 error cases through the tools, a physics
+  sphere dropped from z=2 advances 8 mm in 60 steps instead of landing at 0.15.
+  The simulator is otherwise healthy — 9 DOF readable, `prim_states` populated,
+  no latch — and the same drop is exact on a fresh stage, with or without a
+  robot present. This is what remains of the old "no `prim_states` after a
+  rejected step" entry, which the guard and argument fixes above narrowed but
+  did not close. PhysX and 5.1 are unaffected (23/23 on both).
 
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
