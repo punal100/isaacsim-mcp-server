@@ -108,3 +108,26 @@ def test_create_object_rejects_a_size_that_scales_the_prim_to_nothing():
     """
     src = _function_src(_source("handlers", "objects.py"), "create")
     assert "size <= 0" in src
+
+
+def test_capture_image_checks_the_camera_before_building_the_rtx_pipeline():
+    """Capturing a path that does not exist used to author one.
+
+    A single capture_image on a typo'd path created a Camera prim there plus a
+    render product and a five-node SDG OmniGraph, then asked Replicator to
+    render a frame for it. That is the stray camera + render product pair that
+    cannot be reliably deleted, and on Newton it broke stepping outright — a
+    sphere dropped from z=2 froze at 1.992 through 180 steps where it lands at
+    0.149. The check has to come before adapter.capture_camera_image.
+    """
+    text = _source("handlers", "sensors.py")
+    src = _function_src(text, "capture_image")
+    assert "prim_missing" in src
+    assert src.index("prim_missing") < src.index("capture_camera_image")
+
+
+def test_lidar_read_checks_the_sensor_prim_first():
+    """get_lidar_point_cloud builds a LidarSensor wrapper for whatever path it gets."""
+    src = _function_src(_source("handlers", "sensors.py"), "get_point_cloud")
+    assert "prim_missing" in src
+    assert src.index("prim_missing") < src.index("get_lidar_point_cloud")

@@ -507,16 +507,39 @@ PhysX, with the full gate still clean on all three runtimes.
   integer of 1 or more and says so, pointing at `stop_simulation` for returning
   to the spawn state.
 
-### Known issues
-- **Newton stepping degrades after a run of refused calls.** On Newton only,
-  after the edge suite drives ~20 error cases through the tools, a physics
-  sphere dropped from z=2 advances 8 mm in 60 steps instead of landing at 0.15.
-  The simulator is otherwise healthy — 9 DOF readable, `prim_states` populated,
-  no latch — and the same drop is exact on a fresh stage, with or without a
-  robot present. This is what remains of the old "no `prim_states` after a
-  rejected step" entry, which the guard and argument fixes above narrowed but
-  did not close. PhysX and 5.1 are unaffected (23/23 on both).
+### Fixed — capturing from a camera that does not exist built one, and broke Newton
 
+- **`capture_image` on a typo'd path authored the camera instead of refusing.**
+  The handler never checked the prim, so `capture_camera_image` built a
+  `CameraSensor` for whatever path it was given. Measured on 6.0.1-rc.7, one
+  call against `/World/NoCam` on an empty stage produced: a `Camera` prim at
+  that path, a render product
+  (`/Render/OmniverseKit/HydraTextures/camera_sensor_…`), a five-node SDG
+  OmniGraph under `/Render/PostProcess`, and a queued Replicator frame request.
+
+  Three consequences, all from that one unchecked path:
+
+  * the error came back as "No frame available from /World/NoCam yet", which
+    sends the caller off to retry a path that was never a camera;
+  * a stray camera plus its render product is exactly the pair documented under
+    "removing more than one RTX camera is unreliable", so a single typo could
+    leave a sensor rendering for the life of the Kit process;
+  * **on Newton it broke stepping.** After one such call a physics sphere
+    dropped from z=2 froze at 1.992 through 180 steps, where the same drop
+    lands at 0.149. This was the last open known issue — recorded as "Newton
+    stepping degrades after a run of refused calls", where the error storm was
+    a red herring: bisecting the suite cold-booted, one call per trial, put all
+    of it on this single call.
+
+  `capture_image` now refuses a missing prim, and refuses one that is not a
+  Camera, before any sensor object is constructed. `get_lidar_point_cloud`
+  builds its wrapper the same way and gets the same check.
+
+  Verified on Newton: the edge suite goes 22/23 to **23/23**, the isolated call
+  leaves no prim behind, and a sphere dropped after it lands at 0.149. 5.1 and
+  6.0 PhysX stay at 23/23.
+
+### Known issues
 - **Joint drives do not converge on Newton, confirmed against instrumented
   reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
   steps (-0.399 / -2.000, stable through 1200) but oscillates indefinitely on

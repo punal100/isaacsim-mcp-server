@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Sequence
 
 from ..adapters.base import IsaacAdapterBase
+from .objects import prim_missing
 
 
 def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
@@ -35,6 +36,14 @@ def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["sensors.capture_image"] = lambda **p: capture_image(adapter, **p)
     registry["sensors.create_lidar"] = lambda **p: create_lidar(adapter, **p)
     registry["sensors.get_point_cloud"] = lambda **p: get_point_cloud(adapter, **p)
+
+
+def _prim_type(adapter: IsaacAdapterBase, prim_path: str) -> str:
+    """USD type name of a prim, or "" when it cannot be read."""
+    try:
+        return str(adapter.get_stage().GetPrimAtPath(prim_path).GetTypeName())
+    except Exception:
+        return ""
 
 
 def create_camera(
@@ -81,6 +90,38 @@ def capture_image(
     adapter: IsaacAdapterBase, prim_path: str = "/World/Camera", output_path: Optional[str] = None
 ) -> Dict[str, Any]:
     try:
+        # Check the camera is there BEFORE touching the sensor machinery.
+        # Capturing a path that does not exist used to build the whole RTX
+        # pipeline for it: a Camera prim appeared at the typo'd path, together
+        # with a render product and a five-node SDG OmniGraph, and Replicator
+        # was then asked to render a frame for it. Three consequences, all
+        # measured on 6.0.1-rc.7:
+        #
+        #   * the error said "No frame available from /World/NoCam yet", which
+        #     sends the caller off to retry a path that was never a camera;
+        #   * the stray camera and its render product are exactly the pair that
+        #     "removing more than one RTX camera is unreliable" is about, so a
+        #     typo could leave a sensor rendering for the life of the process;
+        #   * on Newton it broke stepping outright — after one such call a
+        #     sphere dropped from z=2 froze at 1.992 through 180 steps, where
+        #     it otherwise lands at 0.149.
+        if prim_missing(adapter, prim_path):
+            return {
+                "status": "error",
+                "message": (
+                    f"Prim not found: {prim_path}. Create the camera first with create_camera, "
+                    "or pass the path of an existing one."
+                ),
+            }
+        type_name = _prim_type(adapter, prim_path)
+        if type_name and type_name != "Camera":
+            return {
+                "status": "error",
+                "message": (
+                    f"{prim_path} is a {type_name}, not a Camera, so it cannot produce an image. "
+                    "Pass a camera prim, or create one with create_camera."
+                ),
+            }
         image_data = adapter.capture_camera_image(prim_path)
         # An RTX sensor with no frame yet yields an empty array, not an error.
         # Reporting that as success gave back {"shape": [0]} with status
@@ -150,6 +191,14 @@ def get_point_cloud(
     output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
+        if prim_missing(adapter, prim_path):
+            return {
+                "status": "error",
+                "message": (
+                    f"Prim not found: {prim_path}. Create the sensor first with create_lidar, "
+                    "or pass the path of an existing one."
+                ),
+            }
         pc = adapter.get_lidar_point_cloud(prim_path)
         point_count = len(pc) if pc is not None else 0
         # An empty read has three different causes and they need different
