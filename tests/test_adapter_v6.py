@@ -611,18 +611,21 @@ def test_v6_step_pumps_only_for_newton(monkeypatch):
 
     Re-measured on 6.0.1: it did not reproduce on either backend — 60 pumped
     frames under isaac-sim.newton.sh logged no task errors and left the tensor
-    view valid (get_velocities returned -9.8100). And on Newton it is not
-    optional: no direct solver step advances that engine at all. Dropping a body
-    from z=20 for 60 steps, where free fall predicts z=15.095:
+    view valid (get_velocities returned -9.8100). None of the PhysX-side step
+    calls move Newton at all. Dropping a body from z=20 for 60 steps, where
+    free fall predicts z=15.095:
 
         SimulationManager.step      z=20.0000  no motion
         SimulationView.step(dt)     z=20.0000  no motion
         physx.update_simulation     z=20.0000  no motion
         pumped app.update()         z=15.0133  runs
 
-    PhysX keeps SimulationManager.step because it is frame-exact and pumping
-    changes its answers (-2.987 against -3.322 over the same fall). So the pump
-    must stay behind the Newton branch rather than becoming the general path.
+    That was once read as "no direct solver step advances Newton", which was
+    wrong — NewtonStage.step_sim does, exactly, and is now the preferred path
+    (see _newton_step_direct). The pump remains as the fallback for builds
+    without it, and must stay behind the Newton branch either way: PhysX keeps
+    SimulationManager.step because it is frame-exact and pumping changes its
+    answers (-2.987 against -3.322 over the same fall).
     """
     import ast
     import os

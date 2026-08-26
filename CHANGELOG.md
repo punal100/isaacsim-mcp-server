@@ -539,46 +539,95 @@ PhysX, with the full gate still clean on all three runtimes.
   leaves no prim behind, and a sphere dropped after it lands at 0.149. 5.1 and
   6.0 PhysX stay at 23/23.
 
+### Fixed — Newton stepping is now frame-exact, and was never non-reproducible
+
+- **`step_simulation` on Newton advanced about one frame more than asked.** The
+  pumped path ran real app frames, whose substepping does not land on the
+  requested boundary: a 30-step drop from z=20 read `vz=-4.9050` (exactly 0.5 s)
+  on a session's first call and `-5.0031` (0.51 s) on every call after.
+
+  `NewtonStage.step_sim(dt)` runs the solver directly and is exact. It was
+  missed the first time round because the APIs tried then were all PhysX-side
+  (`SimulationManager.step`, `SimulationView.step`, `physx.update_simulation`),
+  none of which move Newton, and the conclusion drawn was that no direct solver
+  step exists. Measured on 6.0.1-rc.7: 30 calls at dt=1/60 from a paused
+  timeline advance `sim_time` 0.05000 → 0.55000 and the step counter 3 → 33,
+  both exact, with the timeline never playing. `step` now uses it and reports
+  `stepping: "exact"`, falling back to the pump (and the old wording) on builds
+  without it. Newton keeps its simulated transforms in Fabric, so the direct
+  path calls `update_fabric()` before returning.
+
+- **"Newton physics is not frame-reproducible" was wrong.** Repeated runs agree
+  bit for bit. The same 30-step drop returned `z=18.732873916625977` and
+  `vz=-4.9050006866455078` on trial after trial and across separate cold boots —
+  identical to the last digit. What actually varied was exactness, not
+  determinism, and the first call of a session differed from later ones in a way
+  that was itself perfectly reproducible. That entry told users to prefer PhysX
+  "where exact stepping matters" on a false premise; with the direct step, all
+  three trials now return the first-call value.
+
+### Changed — the stuck RTX camera is one per session, and 6.0 only
+
+- The old entry called this "removing more than one RTX camera is unreliable, on
+  both runtimes … a race in Replicator's pipeline". Re-measured cold-booted, it
+  is neither unreliable nor a race nor present on both:
+
+  * **5.1 does not have it.** Four cameras created, four deleted, four gone.
+  * **On 6.0 exactly one camera per Kit session is stuck: the first one
+    created.** Deleting the four in reverse order still stranded `Cam0`, so it
+    follows creation order, not deletion order. Creating four more and deleting
+    them in the same session removed all four — the session's victim was
+    already claimed.
+  * Deleting the orphaned render products afterwards does not help (the camera
+    is back before the sweep runs), and a batch delete that skips the sensor
+    release strands all four, which confirms `release_sensor` is load-bearing.
+  * Creating one throwaway camera first makes every camera after it deletable:
+    measured 4 of 4 removed on 6.0 with a sacrificial `/World/__warm` in place.
+
+  `create_camera` now says so on the call that creates the session's first RTX
+  camera, naming the workaround, instead of handing back a prim that cannot be
+  removed without telling anyone. A sacrificial camera is deliberately *not*
+  created automatically: it would leave an undeletable stray in every scene that
+  uses a camera, which is worse for the common case of one camera that is never
+  deleted.
+
 ### Known issues
-- **Joint drives do not converge on Newton, confirmed against instrumented
-  reads.** Commanding the FR3 to j1=-0.4 / j3=-2.0 settles on PhysX in ~150
-  steps (-0.399 / -2.000, stable through 1200) but oscillates indefinitely on
-  Newton: j3 swung between -0.70 and -4.07 across 20.4s of simulated time and
-  never settled.
 
-  Everything upstream of the solver checks out, so this is Newton's solver and
-  not the MCP layer: the commanded targets arrive intact
-  (`get_dof_position_targets` reads back `[0.0, -0.4, 0.0, -2.0, ...]`), the
-  tensor API serves the reads throughout, positions evolve from a genuine zero
-  start, sim time advances 2.55s per 150 steps (60Hz), and *both engines report
-  identical drive gains* (stiffness 3437746.75, damping 343774.69 — the
-  authored 60000/6000 scaled by 180/pi, on PhysX too). Scaling the gains down
-  57x on Newton stabilised j1 exactly on target but left j3 swinging, so softer
-  gains help without being a cure. Re-tune for Newton, or debug motion on PhysX.
+Each of these was re-measured for the release rather than carried forward.
 
-  Note `set_physics_params(time_step=...)` reports "Applied: nothing" on 6.0 —
-  the timestep remedy for a stiff drive is not reachable through that tool.
+- **Joint drives do not converge on Newton.** Commanding the FR3 to j1=-0.4 /
+  j3=-2.0 settles on PhysX in ~150 steps (-0.399 / -2.000, stable through 1200);
+  on Newton the joint sails past its target and keeps going (-0.020 → -0.644
+  against a -0.4 target over 600 steps).
 
-- **Removing more than one RTX camera is unreliable, on both runtimes.** A
-  single camera deletes cleanly and takes its render product with it (verified
-  repeatedly, cold-booted). With several alive, only the first one or two go:
-  measured 1 of 4 removed in one run and 2 of 4 in another with the same cadence
-  and different orderings, so it is a race in Replicator's pipeline rather than
-  an ordering rule. A camera that fails to delete is then stuck permanently —
-  Replicator re-creates both the prim and its render product, the prim
-  reappearing at the end of the parent's children — and repeated `clear_scene`
-  calls make no further progress.
+  The mechanism, read out of the live MuJoCo model: Isaac hands the drive to a
+  MuJoCo actuator as `gainprm[0] = 3437746.75` with `biasprm = [0, -3437746.75,
+  -343774.69]`, against `opt.timestep = 0.002`, `dof_damping = 0` and
+  `dof_armature = 0.1`. The damping term alone works out to `kv·dt/m ≈ 6875`,
+  thousands of times past what an explicit actuator can integrate. PhysX
+  survives the identical gain because its articulation drives are solved
+  implicitly.
 
-  Nothing reachable fixes it: neither wrapper exposes a working teardown
-  (6.0's `RtxCamera` has none at all), deleting the bound render product first
-  brings both back, and deactivating the prim is cosmetic — `capture_image`
-  still succeeds on an inactive prim, so the sensor keeps rendering. Reuse a
-  camera rather than creating several; a simulator restart clears the strays.
-- Only one Isaac Sim instance can run at a time on a single GPU; a second
-  concurrent instance caused device-lost crashes during testing.
-- Newton physics is not frame-reproducible: stepping advances it through the app
-  tick, so repeated runs of the same scene differ slightly. Use PhysX where
-  exact stepping matters.
+  Not reachable from this layer, and now measured rather than assumed. Lowering
+  `opt.timestep` through every exposed knob (`mj_model`, `mjw_model`, `sim_dt`,
+  `physics_frequency`) applies — the step count scales as expected — but the
+  drives then stop acting at all, leaving the arm at 0.000. Editing the gains on
+  `solver.mj_model` provably does nothing: trajectories came back byte-identical
+  at 1x, 57.3x and 500x softer, because the GPU path runs `mjw_model`. (An
+  earlier note here claimed a 57x reduction stabilised j1; that could not be
+  reproduced through this route.) Debug motion on PhysX.
+
+- **The first RTX camera created in a 6.0 session cannot be removed.**
+  `delete_object` reports success and Replicator re-creates the prim and its
+  render product a tick later. Every camera after the first deletes cleanly, so
+  create one throwaway camera first if a scene needs cameras added and removed;
+  a restart clears the stray. `create_camera` warns on the call that creates it.
+  Isaac Sim 5.1 is unaffected — measured 4 of 4 removed there.
+
+- **Only one Isaac Sim instance can run at a time on a single GPU** — a second
+  concurrent instance caused device-lost crashes during testing. An environment
+  constraint on this hardware, not a defect in this server, and deliberately not
+  re-tested (it takes down the running session).
 
 ## [0.6.0] - 2026-06-13
 

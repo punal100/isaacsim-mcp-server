@@ -46,6 +46,20 @@ def _prim_type(adapter: IsaacAdapterBase, prim_path: str) -> str:
         return ""
 
 
+def _first_rtx_camera(adapter: IsaacAdapterBase) -> bool:
+    """True when no RTX camera has been created in this session yet (V6 only).
+
+    Only 6.0 strands its first camera; V5 removes every one of them, so the
+    warning would be false there.
+    """
+    if getattr(adapter, "_engine", None) is None:
+        return False  # V5 has no _engine property at all
+    try:
+        return not getattr(adapter, "_camera_sensors", None)
+    except Exception:
+        return False
+
+
 def create_camera(
     adapter: IsaacAdapterBase,
     prim_path: str = "/World/Camera",
@@ -56,6 +70,7 @@ def create_camera(
 ) -> Dict[str, Any]:
     try:
         res = tuple(resolution) if resolution else (1280, 720)
+        first_of_session = _first_rtx_camera(adapter)
         _cam = adapter.create_camera(prim_path, resolution=res)
 
         aimed_at = None
@@ -81,6 +96,23 @@ def create_camera(
         if aimed_at is not None:
             result["aimed_at"] = aimed_at
             result["rotation"] = rotation
+        if first_of_session:
+            # Measured on 6.0.1-rc.7, cold-booted: the first RTX camera created
+            # in a Kit session cannot be removed. delete_object reports success
+            # and Replicator re-creates the prim and its render product a tick
+            # later. Every camera after it deletes cleanly — four created and
+            # four deleted, twice in a row, with only the first survivor left —
+            # so this is one stuck camera per session, not the race it was
+            # previously recorded as: the survivor is always the first *created*
+            # even when they are deleted in reverse order. 5.1 does not have it
+            # (4 of 4 removed there), hence the engine check.
+            result["warning"] = (
+                f"{prim_path} is the first RTX camera of this Isaac Sim session and cannot be "
+                "removed later — delete_object will report success and the camera will come back. "
+                "If this scene needs cameras added and removed, create one throwaway camera first "
+                "and leave it in place; every camera after the first deletes cleanly. Restarting "
+                "Isaac Sim also clears it."
+            )
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

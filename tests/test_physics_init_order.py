@@ -131,3 +131,24 @@ def test_lidar_read_checks_the_sensor_prim_first():
     src = _function_src(_source("handlers", "sensors.py"), "get_point_cloud")
     assert "prim_missing" in src
     assert src.index("prim_missing") < src.index("get_lidar_point_cloud")
+
+
+def test_newton_steps_the_solver_directly_before_falling_back_to_the_pump():
+    """NewtonStage.step_sim is frame-exact; pumping the app tick is not.
+
+    Measured on 6.0.1-rc.7: 30 direct calls at dt=1/60 advance sim_time by
+    exactly 0.5 s and the step counter by exactly 30, with the timeline never
+    playing. The pump advances ~30.6 frames for the same request -- a 30-step
+    drop from z=20 read vz=-4.905 (exactly 0.5 s) on a session's first call and
+    -5.003 (0.51 s) on later ones. Both are reproducible bit for bit; only the
+    exactness differed.
+    """
+    text = _source("adapters", "v6.py")
+    step = _function_src(text, "step")
+    assert "_newton_step_direct" in step
+    assert step.index("_newton_step_direct") < step.index("omni.kit.app.get_app().update()"), (
+        "the pump must be the fallback, not the first choice"
+    )
+    direct = _function_src(text, "_newton_step_direct")
+    assert "update_fabric" in direct, "Newton keeps simulated transforms in Fabric"
+    assert "playing" in direct, "step_sim only runs the solver while NewtonStage.playing is set"

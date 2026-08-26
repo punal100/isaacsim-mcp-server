@@ -1007,6 +1007,77 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 pass
         return None, False
 
+    def _newton_step_dt(self) -> float:
+        """Seconds per stepped frame, from the PhysicsScene, defaulting to 1/60."""
+        try:
+            scene_path = self._find_physics_scene()
+            if scene_path:
+                attr = self.get_stage().GetPrimAtPath(scene_path).GetAttribute("physxScene:timeStepsPerSecond")
+                rate = attr.Get() if attr else None
+                if rate:
+                    return 1.0 / float(rate)
+        except Exception:
+            pass
+        return 1.0 / 60.0
+
+    def _newton_step_direct(self, num_steps: int) -> bool:
+        """Advance Newton by exactly num_steps frames, without pumping the app.
+
+        NewtonStage.step_sim(dt) runs the solver directly and bumps sim_time and
+        simulation_step_count by exactly one frame per call. It was missed when
+        the pumped path was written: the APIs tried then were the PhysX-side
+        ones (SimulationManager.step, SimulationView.step, physx.update_
+        simulation), all of which leave Newton frozen, and the conclusion drawn
+        was that no direct solver step exists. It does.
+
+        Measured on 6.0.1-rc.7, 30 calls at dt=1/60 from a paused timeline:
+        sim_time 0.05000 -> 0.55000 and step count 3 -> 33, both exact, with the
+        timeline never playing and the body falling as expected. The pumped path
+        advances ~30.6 frames for the same request, because a pump runs a real
+        app frame whose physics substepping does not land on the boundary.
+
+        step_sim() only runs the solver while NewtonStage.playing is set, which
+        the timeline event otherwise drives, so it is set for the duration and
+        restored afterwards. Fabric holds Newton's simulated transforms, so
+        update_fabric() has to run before any read.
+
+        Returns False when this build cannot be stepped this way, so step()
+        falls back to the pump rather than silently doing nothing.
+        """
+        try:
+            import isaacsim.physics.newton as newton_ext
+
+            newton_stage = newton_ext.acquire_stage()
+        except Exception:
+            return False
+        if newton_stage is None:
+            return False
+        if not getattr(newton_stage, "initialized", False) or getattr(newton_stage, "_init_failed", False):
+            return False
+        step_sim = getattr(newton_stage, "step_sim", None)
+        if not callable(step_sim):
+            return False
+
+        dt = self._newton_step_dt()
+        was_playing = getattr(newton_stage, "playing", False)
+        try:
+            newton_stage.playing = True
+            for _ in range(num_steps):
+                step_sim(dt)
+        except Exception as exc:
+            print(f"_newton_step_direct: falling back to the pump ({exc})")
+            return False
+        finally:
+            try:
+                newton_stage.playing = was_playing
+            except Exception:
+                pass
+        try:
+            newton_stage.update_fabric()
+        except Exception as exc:
+            print(f"_newton_step_direct: update_fabric failed ({exc})")
+        return True
+
     def _newton_model_bodies(self):
         """(NewtonStage, set of body paths in its model) or (None, None)."""
         try:
@@ -1613,6 +1684,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
             timeline = omni.timeline.get_timeline_interface()
             resume_paused = not timeline.is_playing()
+            stepped_directly = False
             # Running the timeline evaluates Action Graphs, so a ScriptNode
             # controller re-commands the robot on every stepped frame and
             # silently discards the caller's set_joint_positions -- measured on
@@ -1623,16 +1695,21 @@ class IsaacAdapterV6(IsaacAdapterBase):
             # graph-driven run.
             with self._graphs_suspended() as suspended:
                 suspended_graphs = [str(path) for path in suspended] if suspended else []
-                if resume_paused:
-                    timeline.play()
-                try:
-                    for _ in range(num_steps):
-                        omni.kit.app.get_app().update()
-                finally:
+                # Preferred: step the solver directly, which is frame-exact and
+                # never runs an app frame. The pump below is the fallback for
+                # builds without NewtonStage.step_sim.
+                stepped_directly = self._newton_step_direct(num_steps)
+                if not stepped_directly:
                     if resume_paused:
-                        # Pause, not stop: stop resets to the spawn pose and
-                        # throws away the physics result being measured.
-                        timeline.pause()
+                        timeline.play()
+                    try:
+                        for _ in range(num_steps):
+                            omni.kit.app.get_app().update()
+                    finally:
+                        if resume_paused:
+                            # Pause, not stop: stop resets to the spawn pose and
+                            # throws away the physics result being measured.
+                            timeline.pause()
         else:
             SimulationManager.step(steps=num_steps)
 
@@ -1653,11 +1730,15 @@ class IsaacAdapterV6(IsaacAdapterBase):
         if suspended_graphs:
             result["graphs_suspended"] = suspended_graphs
         if approximate:
-            result["stepping"] = "approximate"
-            result["stepping_note"] = (
-                "Newton advances only on the app tick, so these frames are about one step plus "
-                "render jitter off exact. Physics results are not frame-reproducible on this engine."
-            )
+            if stepped_directly:
+                result["stepping"] = "exact"
+            else:
+                result["stepping"] = "approximate"
+                result["stepping_note"] = (
+                    "This build has no NewtonStage.step_sim, so the frames were advanced by pumping "
+                    "the app tick, which lands about one step past the requested count. Newton is "
+                    "still deterministic — repeated runs of the same scene agree bit for bit."
+                )
 
         if observe_prims:
             from pxr import UsdPhysics
