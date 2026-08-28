@@ -86,4 +86,5 @@ mcp_cache/
 
 # Code agents configurations
 .claude
+.superpowers
 .mcp.json
