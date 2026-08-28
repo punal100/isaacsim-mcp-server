@@ -177,7 +177,10 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def get_physics_state(prim_path: str) -> str:
         """Diagnostic tool: get physics state for a prim.
 
-        Returns rigid body status, mass, velocities, kinematic flag, and collision info.
+        Returns rigid body status, velocities, kinematic flag, and collision info.
+        `mass` is included only when the prim carries a UsdPhysics MassAPI —
+        objects created by create_object do not, and take their mass from the
+        collider's density.
         Velocity units: linear_velocity in m/s, angular_velocity in rad/s.
         Velocities are only non-zero once the simulation has advanced — step the
         simulation (or play) before reading them.

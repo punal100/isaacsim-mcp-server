@@ -181,3 +181,97 @@ def test_stale_check_is_instant_on_a_healthy_socket_with_a_timeout_set():
         assert conn.sock.gettimeout() == 300.0
     finally:
         server.shutdown()
+
+
+class _ErroringIsaac(threading.Thread):
+    """Stand-in for a Kit extension that rejects a command.
+
+    Replies with the extension's own error envelope — the shape
+    `_execute_command` produces when a handler validates its input and refuses.
+    Nothing is wrong with the connection itself, which is the whole point.
+    """
+
+    daemon = True
+
+    def __init__(self, message: str):
+        super().__init__()
+        self._message = message
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.port = self._listener.getsockname()[1]
+        self.connections_accepted = 0
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            self.connections_accepted += 1
+            with conn:
+                conn.settimeout(5)
+                while not self._stop.is_set():
+                    try:
+                        raw = conn.recv(65536)
+                    except OSError:
+                        break
+                    if not raw:
+                        break
+                    conn.sendall(json.dumps({"status": "error", "message": self._message}).encode())
+
+    def shutdown(self):
+        self._stop.set()
+        self._listener.close()
+
+
+def test_server_side_error_is_surfaced_verbatim():
+    """A handler's validation message must reach the caller unchanged.
+
+    Prefixing it with "Communication error with Isaac" tells an agent the
+    transport failed, so it reconnects and retries instead of correcting the
+    input that was actually wrong.
+    """
+    message = "size must be greater than 0 (got 0.0); a zero or negative size scales the prim to nothing"
+    server = _ErroringIsaac(message)
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        try:
+            conn.send_command("objects.create", {"size": 0})
+        except Exception as exc:
+            assert str(exc) == message, f"message was rewritten: {exc!r}"
+        else:
+            raise AssertionError("expected the server-side error to raise")
+    finally:
+        server.shutdown()
+
+
+def test_server_side_error_keeps_the_socket_open():
+    """A rejected command must not cost the connection.
+
+    The socket is healthy — the server answered. Clearing it forces a redial on
+    every subsequent call, and the project deliberately redials rather than
+    retries, so the next command pays for a failure that never happened.
+    """
+    server = _ErroringIsaac("Prim not found: /World/Nope")
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        try:
+            conn.send_command("objects.transform", {"prim_path": "/World/Nope"})
+        except Exception:
+            pass
+        assert conn.sock is not None, "a validation error discarded a healthy socket"
+
+        try:
+            conn.send_command("objects.transform", {"prim_path": "/World/Nope"})
+        except Exception:
+            pass
+        assert server.connections_accepted == 1, (
+            f"reconnected {server.connections_accepted} times for validation errors"
+        )
+    finally:
+        server.shutdown()

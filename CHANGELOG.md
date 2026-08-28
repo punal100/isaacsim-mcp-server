@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cameras could not be deleted** — the sensor wrapper re-created the prim a tick later.
 - **Commands sent during startup failed with a raw `AttributeError`** — the socket opens seconds before Kit has a stage.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree.
+- **Every validation error was reported as a connection failure** — a typo'd prim path or a bad size came back as "Communication error with Isaac", which reads as a transport fault, and the healthy socket was thrown away and redialled on the next call.
+- **`reload_script(module_name=...)` re-ran stale bytecode** — editing a controller and reloading it reported success while the previous version kept running, whenever the edit left the file the same length.
 
 ### Notes
 - Verified on device on Isaac Sim 5.1.0, 6.0.1 PhysX and 6.0.1 Newton, cold-booted one instance at a time with the GUI.

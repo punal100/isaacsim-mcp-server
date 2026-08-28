@@ -35,6 +35,64 @@ if TYPE_CHECKING:
     from pxr import Usd
 
 
+def spherical_to_cartesian(azimuth_deg, elevation_deg, range_m) -> List[List[float]]:
+    """Convert a lidar sweep from (azimuth, elevation, range) to sensor-local XYZ.
+
+    6.0's unified `generic-model-output` annotator reports elements in the
+    convention named by `omni:sensor:Core:elementsCoordsType`, which is
+    SPHERICAL for the shipped rotary configs: x/y/z hold azimuth degrees,
+    elevation degrees and metres. Returned as-is they look like a point cloud
+    and are not one — `bounds` spanned the sensor's elevation limits and
+    `nearest.distance` was the norm of two angles and a range.
+
+    Azimuth is measured in the sensor's horizontal plane from +X toward +Y, and
+    elevation from that plane toward +Z, so a return dead ahead lands on +X and
+    the -15 deg floor returns land below the sensor.
+
+    Plain arithmetic rather than vectorised numpy: this is the one piece of the
+    lidar path whose correctness is pure geometry, and keeping it dependency-free
+    is what lets it be tested outside Kit. A full 47k-point sweep converts in a
+    few milliseconds.
+    """
+    import math
+
+    rows: List[List[float]] = []
+    for az, el, r in zip(azimuth_deg, elevation_deg, range_m):
+        az_rad = math.radians(float(az))
+        el_rad = math.radians(float(el))
+        rng = float(r)
+        horizontal = rng * math.cos(el_rad)
+        rows.append(
+            [
+                horizontal * math.cos(az_rad),
+                horizontal * math.sin(az_rad),
+                rng * math.sin(el_rad),
+            ]
+        )
+    return rows
+
+
+def drop_stale_bytecode(file_path: str) -> None:
+    """Remove the cached bytecode for a source file before reloading it.
+
+    `importlib.reload()` alone re-ran the previous contents: CPython validates a
+    .pyc against the source's mtime *and* size, so a controller edit that keeps
+    the file the same length (``VERSION = 1`` -> ``VERSION = 2``) can look
+    unchanged. The tool then reported "reloaded successfully" while the old code
+    kept running, which is worse than failing outright.
+
+    Best effort: a module that was never imported has no cache, and a read-only
+    __pycache__ is not worth failing a reload over.
+    """
+    import importlib.util
+    import os
+
+    with contextlib.suppress(Exception):
+        cache = importlib.util.cache_from_source(file_path)
+        if cache and os.path.exists(cache):
+            os.remove(cache)
+
+
 class IsaacAdapterBase(ABC):
     """Abstract interface that isolates all Isaac Sim version-specific API calls.
 

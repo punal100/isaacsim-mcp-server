@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .base import IsaacAdapterBase
+from .base import IsaacAdapterBase, drop_stale_bytecode
 from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 
@@ -1479,6 +1479,13 @@ class IsaacAdapterV5(IsaacAdapterBase):
             if module_name:
                 # Reload existing module or import for first time
                 if module_name in sys.modules:
+                    # Drop the cached bytecode first: reload() alone re-ran the
+                    # previous contents for a same-length edit and still
+                    # reported success (issue #27).
+                    existing = getattr(sys.modules[module_name], "__file__", None)
+                    if existing:
+                        drop_stale_bytecode(existing)
+                    importlib.invalidate_caches()
                     _module = importlib.reload(sys.modules[module_name])
                     msg = f"Module '{module_name}' reloaded successfully"
                 else:

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .base import IsaacAdapterBase
+from .base import IsaacAdapterBase, drop_stale_bytecode, spherical_to_cartesian
 from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 from .version import version_string
@@ -1458,7 +1458,35 @@ class IsaacAdapterV6(IsaacAdapterBase):
         x = np.asarray(gmo.x)[:count]
         y = np.asarray(gmo.y)[:count]
         z = np.asarray(gmo.z)[:count]
+        # x/y/z are only Cartesian when the sensor says so. The shipped rotary
+        # configs declare SPHERICAL, and returning those raw handed callers
+        # azimuth/elevation degrees under a "meters" label: a 2 m wall 3 m ahead
+        # came back spanning +-18.4 (its subtended angle) with a "z" of 3.0 (the
+        # range). Read the convention off the prim rather than assuming either.
+        if self._lidar_elements_are_spherical(prim_path):
+            rows = spherical_to_cartesian(x, y, z)
+            x = [r[0] for r in rows]
+            y = [r[1] for r in rows]
+            z = [r[2] for r in rows]
         return np.stack([x, y, z], axis=-1).astype(np.float32)
+
+    def _lidar_elements_are_spherical(self, prim_path: str) -> bool:
+        """Read `omni:sensor:Core:elementsCoordsType` off the lidar prim.
+
+        Defaults to True when the attribute is missing or unreadable: every
+        shipped rotary config measured on 6.0.1 is SPHERICAL, so assuming
+        Cartesian would silently restore the wrong-units bug.
+        """
+        try:
+            prim = self.get_stage().GetPrimAtPath(prim_path)
+            attr = prim.GetAttribute("omni:sensor:Core:elementsCoordsType")
+            if attr and attr.IsValid():
+                value = attr.Get()
+                if value is not None:
+                    return str(value).upper() == "SPHERICAL"
+        except Exception:
+            pass
+        return True
 
     # ── Materials ──────────────────────────────────────────
 
@@ -1949,6 +1977,13 @@ class IsaacAdapterV6(IsaacAdapterBase):
         try:
             if module_name:
                 if module_name in sys.modules:
+                    # Drop the cached bytecode first: reload() alone re-ran the
+                    # previous contents for a same-length edit and still
+                    # reported success (issue #27).
+                    existing = getattr(sys.modules[module_name], "__file__", None)
+                    if existing:
+                        drop_stale_bytecode(existing)
+                    importlib.invalidate_caches()
                     _module = importlib.reload(sys.modules[module_name])
                     msg = f"Module '{module_name}' reloaded successfully"
                 else:

@@ -35,6 +35,20 @@ def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["graphs.edit_action_graph"] = lambda **p: edit_action_graph(adapter, **p)
 
 
+def _absolute_attr_path(graph_path: str, attr_spec: str) -> str:
+    """Resolve a relative attribute spec against its graph.
+
+    `og.Controller.edit(SET_VALUES)` does not resolve a bare
+    "ScriptNode.inputs:script" against the graph path it was handed — it fails
+    with "node=None, graph=None". Only usePath/scriptPath used to be resolved,
+    which left every other attribute — including the inline-script form this
+    tool documents — unsettable.
+    """
+    if attr_spec.startswith("/"):
+        return attr_spec
+    return f"{graph_path}/{attr_spec}"
+
+
 def force_recompile_scriptnode(graph, node) -> None:
     """Force a ScriptNode to re-read and recompile its script.
 
@@ -231,9 +245,9 @@ def edit_action_graph(
 
                 # usePath and scriptPath need direct attribute set
                 if "inputs:usePath" in attr_spec or "inputs:scriptPath" in attr_spec:
-                    direct_set_list.append((attr_spec, val))
+                    direct_set_list.append((_absolute_attr_path(graph_path, attr_spec), val))
                 else:
-                    set_values_list.append((attr_spec, val))
+                    set_values_list.append((_absolute_attr_path(graph_path, attr_spec), val))
 
             # Apply SET_VALUES via og.Controller.edit() on existing graph
             if set_values_list:
@@ -251,10 +265,8 @@ def edit_action_graph(
                     return {"status": "error", "message": f"Graph not found at {graph_path}"}
 
                 for attr_spec, val in direct_set_list:
-                    # Resolve to absolute if relative
-                    if not attr_spec.startswith("/"):
-                        attr_spec = f"{graph_path}/{attr_spec}"
-
+                    # Already absolute: both branches resolve up front, so the
+                    # two paths cannot drift apart again.
                     # Split "…/NodeName.inputs:attrName" into node path + attr name
                     for sep in (".inputs:", ".outputs:", ".state:"):
                         dot_idx = attr_spec.rfind(sep)

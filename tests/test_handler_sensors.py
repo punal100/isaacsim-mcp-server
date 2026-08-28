@@ -291,6 +291,20 @@ def test_v6_lidar_decodes_the_generic_model_output_buffer(monkeypatch):
 
     pc = adapter.get_lidar_point_cloud("/World/Lidar")
 
+    # numElements decides the row count, not the byte length of the buffer.
     assert pc.shape == (3, 3), pc
-    assert pc[0].tolist() == [1.0, 4.0, 7.0]
-    assert pc[2].tolist() == [3.0, 6.0, 9.0]
+
+    # The shipped rotary configs declare elementsCoordsType = SPHERICAL, so the
+    # decoded x/y/z are azimuth degrees, elevation degrees and range metres and
+    # must come back as Cartesian metres (issue #22). Range is the invariant
+    # that survives the conversion: each point sits its own range from the
+    # sensor origin.
+    import math
+
+    for row, expected_range in zip(pc.tolist(), [7.0, 8.0, 9.0]):
+        assert math.isclose(math.dist([0.0, 0.0, 0.0], row), expected_range, rel_tol=1e-6), row
+
+    # First element: azimuth 1 deg, elevation 4 deg, range 7 m.
+    horizontal = 7.0 * math.cos(math.radians(4.0))
+    assert math.isclose(pc[0].tolist()[0], horizontal * math.cos(math.radians(1.0)), rel_tol=1e-6)
+    assert math.isclose(pc[0].tolist()[2], 7.0 * math.sin(math.radians(4.0)), rel_tol=1e-6)

@@ -147,8 +147,13 @@ def set_physics(
         if not applied and not unsupported:
             return {"status": "error", "message": "No physics parameters supplied"}
         if unsupported:
+            # Status follows what actually happened to the stage. A partial
+            # apply is a success that names what it dropped: reporting `error`
+            # after writing gravity told the caller nothing had changed while
+            # the scene was already on Mars. Only a request where *nothing*
+            # could be applied is a failure.
             return {
-                "status": "error",
+                "status": "success" if applied else "error",
                 "message": (
                     f"Applied: {applied or 'nothing'}. Not supported by this adapter and therefore "
                     f"ignored: {unsupported}. Set them directly with execute_script if you need them."

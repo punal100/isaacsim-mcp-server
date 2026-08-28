@@ -115,3 +115,39 @@ def test_action_graph_evaluator_defaults_to_execution():
                 )
                 found = True
         assert found, f"create_action_graph not found in {rel}"
+
+
+def test_relative_attr_path_resolves_against_the_graph():
+    """Relative specs are the documented form and must resolve for every attribute.
+
+    og.Controller.edit(SET_VALUES) does not resolve a bare "Node.inputs:attr"
+    against the graph it was handed — it reports
+    "node=None, graph=None" — so the handler has to do it. usePath and
+    scriptPath already did; everything else, including the inline-script
+    example in the docstring, did not.
+    """
+    from isaac_sim_mcp_extension.handlers.graphs import _absolute_attr_path
+
+    assert _absolute_attr_path("/World/G", "ScriptNode.inputs:script") == "/World/G/ScriptNode.inputs:script"
+
+
+def test_absolute_attr_path_is_left_alone():
+    from isaac_sim_mcp_extension.handlers.graphs import _absolute_attr_path
+
+    already = "/World/G/ScriptNode.inputs:script"
+    assert _absolute_attr_path("/World/G", already) == already
+
+
+def test_edit_action_graph_resolves_every_attribute_not_just_usepath():
+    """The SET_VALUES branch must resolve paths the same way the direct branch does."""
+    import ast
+
+    tree = ast.parse(_handler_src())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "edit_action_graph":
+            calls = [n.func.id for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+            assert calls.count("_absolute_attr_path") >= 2, (
+                "both the SET_VALUES and direct-set branches must resolve relative paths"
+            )
+            return
+    raise AssertionError("edit_action_graph not found")
