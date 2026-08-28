@@ -46,16 +46,29 @@ def _prim_type(adapter: IsaacAdapterBase, prim_path: str) -> str:
         return ""
 
 
-def _first_rtx_camera(adapter: IsaacAdapterBase) -> bool:
-    """True when no RTX camera has been created in this session yet (V6 only).
+def _first_rtx_camera(adapter: IsaacAdapterBase, prim_path: str) -> bool:
+    """True when this is the first RTX camera of the Kit session (V6 only).
 
     Only 6.0 strands its first camera; V5 removes every one of them, so the
     warning would be false there.
+
+    This used to ask whether `_camera_sensors` was empty, which is not the same
+    question. V6 releases every cached sensor on timeline STOP — deliberately,
+    since that is what lets a camera be deleted — so the cache empties on every
+    play/stop cycle and the next camera was announced as the session's first.
+    Measured on 6.0.1 PhysX: A1 warned, then after play/stop A3 warned, then
+    after another cycle A5 warned, while A1 was the only stranded one. That
+    inverts the workaround this warning exists to give.
+
+    So record it once, on the adapter, on a name nothing else clears.
     """
     if getattr(adapter, "_engine", None) is None:
         return False  # V5 has no _engine property at all
     try:
-        return not getattr(adapter, "_camera_sensors", None)
+        if getattr(adapter, "_first_rtx_camera_path", None) is not None:
+            return False
+        adapter._first_rtx_camera_path = prim_path
+        return True
     except Exception:
         return False
 
@@ -70,7 +83,7 @@ def create_camera(
 ) -> Dict[str, Any]:
     try:
         res = tuple(resolution) if resolution else (1280, 720)
-        first_of_session = _first_rtx_camera(adapter)
+        first_of_session = _first_rtx_camera(adapter, prim_path)
         _cam = adapter.create_camera(prim_path, resolution=res)
 
         aimed_at = None

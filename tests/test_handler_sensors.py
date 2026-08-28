@@ -308,3 +308,86 @@ def test_v6_lidar_decodes_the_generic_model_output_buffer(monkeypatch):
     horizontal = 7.0 * math.cos(math.radians(4.0))
     assert math.isclose(pc[0].tolist()[0], horizontal * math.cos(math.radians(1.0)), rel_tol=1e-6)
     assert math.isclose(pc[0].tolist()[2], 7.0 * math.sin(math.radians(4.0)), rel_tol=1e-6)
+
+
+# ── first-RTX-camera warning (issue #29) ─────────────────────────────────────
+
+
+class _V6CameraAdapter:
+    """V6-shaped adapter: has _engine, caches cameras, releases them on stop.
+
+    Mirrors the real thing closely enough to reproduce #29: V6 subscribes to the
+    timeline STOP event and calls release_all_sensors(), which empties
+    _camera_sensors. That release is deliberate — it is what makes a camera
+    deletable — so the warning must not read that cache to decide whether a
+    camera has ever been created.
+    """
+
+    _engine = "physx"
+
+    def __init__(self):
+        self._camera_sensors = {}
+
+    def create_camera(self, prim_path, resolution=(1280, 720), **kwargs):
+        self._camera_sensors[prim_path] = object()
+        return self._camera_sensors[prim_path]
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+    def release_all_sensors(self):
+        """What the timeline STOP handler does."""
+        self._camera_sensors.clear()
+
+
+def test_first_camera_warning_fires_on_the_first_camera():
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    first = create_camera(adapter, prim_path="/World/A1")
+
+    assert "warning" in first, "the session's first RTX camera must be flagged"
+    assert "/World/A1" in first["warning"]
+
+
+def test_second_camera_is_not_flagged():
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    create_camera(adapter, prim_path="/World/A1")
+    second = create_camera(adapter, prim_path="/World/A2")
+
+    assert "warning" not in second
+
+
+def test_a_stop_cycle_does_not_re_arm_the_first_camera_warning():
+    """Measured on 6.0.1 PhysX: play -> stop -> create_camera warned again.
+
+    Only one camera per Kit session is actually stranded (#20), so a second
+    warning names the wrong prim and inverts that issue's documented workaround
+    — the user keeps the newly named camera as the throwaway while the real
+    survivor is the first one.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    create_camera(adapter, prim_path="/World/A1")
+
+    adapter.release_all_sensors()  # the timeline STOP handler
+
+    after_stop = create_camera(adapter, prim_path="/World/A3")
+
+    assert "warning" not in after_stop, (
+        "a play/stop cycle re-armed the warning; it named /World/A3 while /World/A1 is the camera actually stranded"
+    )
+
+
+def test_v5_never_gets_the_warning():
+    """5.1 removes every camera, so the warning would be false there."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    class _V5Adapter(_V6CameraAdapter):
+        _engine = None
+
+    result = create_camera(_V5Adapter(), prim_path="/World/A1")
+    assert "warning" not in result
