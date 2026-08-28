@@ -48,10 +48,20 @@ Five places, in order: `isaac_mcp/tools/<category>.py` → new command string �
 ## Conventions and traps
 
 - Every `.py` file carries the MIT header block; `add_license_headers.py` applies it.
-- Handlers **must not** call `omni.kit.app.update()` — they run as an asyncio task on Kit's main loop and pumping it crashes Kit (see the comment in `socket_server._dispatch_command`; `v6.step` uses `SimulationManager.step` instead).
+- Handlers **must not** call `omni.kit.app.update()` — they run as an asyncio task on Kit's main loop and pumping it crashes Kit (see the comment in `socket_server._dispatch_command`). `v6.step` uses `SimulationManager.step` under PhysX and `NewtonStage.step_sim` under Newton, both of which advance physics without an app frame; the Newton pump survives only as a fallback for builds without `step_sim`.
 - Several tests assert on *source substrings* of tool docstrings and the server instruction block ([tests/test_tool_docstrings.py](tests/test_tool_docstrings.py)) — rewording docs breaks tests, deliberately. Update both together.
 - [tests/conftest.py](tests/conftest.py) stubs `carb`, `omni`, `pxr`, and `numpy` into `sys.modules` so the extension imports outside Kit. New runtime imports at module scope may need a stub added there; `pytest.ini_options.pythonpath` points at `isaac.sim.mcp_extension`.
 - Behavioral contracts encoded in `base.py` and worth preserving — each fixed a silent-wrong-answer bug: exactly one `PhysicsScene` on the stage (a second one zeroes every velocity read), gravity written as USD direction+magnitude, Action Graphs suspended during `step` (else a ScriptNode overwrites stepped joint targets), `_ensure_physics_world` no-ops until a PhysicsScene exists.
 - Debug loop is **step-only on a frozen timeline**; `play` is for the final Action-Graph run. The two modes do not mix — that split is repeated in the server instructions, tool docstrings, and adapter comments.
 - ScriptNode scripts must define `setup(db)`/`compute(db)`; legacy mode (no `compute`) breaks exec scoping. Full rules in [isaac.sim.mcp_extension/.cursorrules](isaac.sim.mcp_extension/.cursorrules); working example in [demo/franka_pick_place.py](demo/franka_pick_place.py).
-- Design docs and plans for past feature work live in [docs/superpowers/](docs/superpowers/); `CHANGELOG.md` records why each adapter API was chosen.
+- Design docs and plans for past feature work live in [docs/superpowers/](docs/superpowers/).
+
+## Changelog and issues
+
+`CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/): `Added` / `Changed` / `Fixed`, newest version first, and a dated heading when the version is cut.
+
+**Classify against the baseline, which is the last *released* version — not against the working tree.** An entry belongs under `Fixed` only if a user of that release could actually hit it. Anything introduced *and* resolved inside the current cycle never shipped, so it is part of the `Added`/`Changed` entry for the work that introduced it, never a fix of its own. Isaac Sim 6.0 and the Newton backend both landed in 0.6.0, so the Newton defects found while building them fold into the "Newton engine parity" bullet — a 0.5.2 user never had them. The same goes for a fix that took three passes to land: one entry, not three.
+
+Keep each entry to a line or two — what broke, and what the user saw. Investigation notes, measurements and rejected hypotheses belong in the commit message, and in a code comment wherever they stop someone re-breaking it. A changelog that records everything is unreadable.
+
+**Known issues do not go in the changelog.** File them on GitHub using [.github/ISSUE_TEMPLATE/bug-report.yml](.github/ISSUE_TEMPLATE/bug-report.yml) — fill in every field, and include the measurements plus any workaround. When one is later addressed, say so on the issue and close it, including issues we opened ourselves, so the record does not drift. Only a standing environment constraint (for example: one Isaac Sim instance per GPU) stays in the changelog, under `Notes`.
