@@ -65,3 +65,23 @@ Five places, in order: `isaac_mcp/tools/<category>.py` → new command string �
 Keep each entry to a line or two — what broke, and what the user saw. Investigation notes, measurements and rejected hypotheses belong in the commit message, and in a code comment wherever they stop someone re-breaking it. A changelog that records everything is unreadable.
 
 **Known issues do not go in the changelog.** File them on GitHub using [.github/ISSUE_TEMPLATE/bug-report.yml](.github/ISSUE_TEMPLATE/bug-report.yml) — fill in every field, and include the measurements plus any workaround. When one is later addressed, say so on the issue and close it, including issues we opened ourselves, so the record does not drift. Only a standing environment constraint (for example: one Isaac Sim instance per GPU) stays in the changelog, under `Notes`.
+
+**Never open an issue from a single observation.** Reproduce it deliberately, more than once **and on more than one runtime**, before filing. A simulator is not a deterministic machine: an instance can crash, a GPU context can be lost, a render frame can drop, a sensor can return nothing on a frame that should have filled — and any of those looks exactly like a bug the first time you meet it. One sighting is a lead, not a finding.
+
+The second runtime is not a formality, it is the control. A fault that appears on 5.1 and 6.0 PhysX and 6.0 Newton is in this code; a fault that appears on one and not the others is either version-specific — which is itself the finding, and belongs in the issue — or it was never a fault at all. Most false reports die at this step, so take it before writing anything up.
+
+**Suspect your own test process first.** Every retraction in this repository's history came from the harness, not the product: a unit suite run against a live socket, a diagnostic script leaking sensor objects onto a prim that was later deleted, a stage left dirty by a previous attempt. Before filing, ask what *you* did to that instance, and re-run the case on a cold boot that does nothing else. If it survives that, it is real.
+
+Retry it. Then decide which of these you have, and say which in the issue:
+
+- **Reproduces every time** — file it with the exact steps and the measurements. This is the normal case and the only one that needs no caveat.
+- **Reproduces sometimes** — file it, and give the count: how many attempts, how many reproduced, and what you varied between them. "1 fill in ~15 reads across two cold boots" is a finding; "it's flaky" is not.
+- **Did not reproduce** — the fault may still be real, and "not reliably reproducible" is a legitimate thing to report, but *only once repeated attempts have established it*. Say how many you ran and what you changed each time. Without that, do not file: you are reporting a crash you saw once, and it belongs in the working notes until someone can trigger it.
+
+The number of attempts is itself evidence and belongs in the issue body. An issue that cannot say how many times anyone tried to reproduce it wastes the next reader's time, and each Isaac Sim boot is minutes — do not spend that budget on a lead you did not chase yourself first.
+
+**Closing an issue takes the same evidence as opening one.** A patch is not a fix until it has been confirmed live, several times, on **every version the bug was reproduced on** — 5.1, 6.0 PhysX and 6.0 Newton as applicable. One green read after a change proves the code path ran once, not that the defect is gone; sensors and physics both produce right answers intermittently, which is how a half-fix passes a single check.
+
+Confirm on each affected runtime, more than once per runtime, then close the issue with the measurements from each. Do not close on a fix verified in one version and assumed in another, even when the versions share the adapter — if it was measured broken on Newton, it is closed on Newton. If a runtime cannot be checked (`isaac_mcp/` changes need an MCP client restart, which Kit's extension reload does not cover), say so on the issue and name what was substituted instead, rather than implying coverage you do not have.
+
+Unit tests are necessary and never sufficient here: the whole reason this project keeps a live sweep is that the fakes standing in for a stage, a physics step or an OmniGraph are exactly the assumptions that break.
