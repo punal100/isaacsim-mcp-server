@@ -200,6 +200,18 @@ def delete(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict[s
         # that never existed, so a typo read as a successful delete.
         if prim_missing(adapter, prim_path):
             return {"status": "error", "message": f"Prim not found: {prim_path}"}
+
+        # Note the type before it goes: RTX sensors are the prims that come back.
+        doomed_type = ""
+        try:
+            stage_before = adapter.get_stage()
+            if stage_before is not None:
+                doomed = stage_before.GetPrimAtPath(prim_path)
+                if doomed and doomed.IsValid():
+                    doomed_type = str(doomed.GetTypeName())
+        except Exception:
+            pass
+
         adapter.delete_prim(prim_path)
 
         # Confirm it actually went, so an immediate failure is not reported as
@@ -227,7 +239,23 @@ def delete(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict[s
                     "message": f"{prim_path} still exists after delete.{detail}",
                     "prim_path": prim_path,
                 }
-        return {"status": "success", "message": f"Deleted {prim_path}"}
+        result = {"status": "success", "message": f"Deleted {prim_path}"}
+        if doomed_type in ("OmniLidar", "Camera"):
+            # The check above is same-tick, and an RTX sensor is gone in this
+            # tick and back in the next: measured on 5.1.0, deleting an
+            # OmniLidar leaves no OmniLidar on the stage but puts a Camera prim
+            # at the same path a tick later, and on 6.0 the session's first
+            # camera returns in full (#20). A handler cannot wait a tick to look
+            # again -- pumping Kit's loop from inside one crashes it -- so say
+            # the resurrection is possible rather than let plain success imply
+            # the path is now free.
+            result["warning"] = (
+                f"{prim_path} was an RTX sensor ({doomed_type}) and Replicator may re-create a prim "
+                "at this path on the next tick — the delete itself succeeded, but the path may not "
+                "stay free. Confirm with list_prims before reusing it, and prefer reusing a sensor "
+                "over deleting and re-creating one."
+            )
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

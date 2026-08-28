@@ -48,3 +48,87 @@ def test_create_leaves_canonical_and_unknown_types_untouched():
         objects.create(adapter, object_type=given, prim_path="/World/x")
         _args, kwargs = adapter.create_prim.call_args
         assert kwargs.get("prim_type") == expected
+
+
+# ── deleting an RTX sensor (issues #20, #25) ─────────────────────────────────
+
+
+class _SensorStage:
+    """Stage whose prim vanishes on delete, the way an RTX sensor does in-tick."""
+
+    def __init__(self, path, type_name):
+        self._path = path
+        self._type = type_name
+        self.deleted = False
+
+    def GetPrimAtPath(self, path):
+        if path != self._path or self.deleted:
+            return _GonePrim()
+        return _LivePrim(self._type)
+
+
+class _LivePrim:
+    def __init__(self, type_name):
+        self._type = type_name
+
+    def IsValid(self):
+        return True
+
+    def GetTypeName(self):
+        return self._type
+
+
+class _GonePrim:
+    def IsValid(self):
+        return False
+
+    def GetTypeName(self):
+        return ""
+
+
+class _SensorAdapter:
+    def __init__(self, path, type_name):
+        self.stage = _SensorStage(path, type_name)
+
+    def get_stage(self):
+        return self.stage
+
+    def delete_prim(self, prim_path):
+        self.stage.deleted = True
+        return True
+
+
+def test_deleting_a_lidar_warns_that_it_may_come_back():
+    """Measured on 5.1.0: the OmniLidar is gone in-tick, and Replicator puts a
+    Camera prim back at the same path a tick later. The handler's post-delete
+    check runs in the same tick so it sees the prim gone and reports plain
+    success, and the caller is left believing the path is free.
+
+    A handler must not pump Kit's loop to wait a tick, so the honest move is to
+    say the resurrection is possible and how to confirm it.
+    """
+    from isaac_sim_mcp_extension.handlers.objects import delete
+
+    result = delete(_SensorAdapter("/World/L", "OmniLidar"), prim_path="/World/L")
+
+    assert result["status"] == "success"
+    assert "warning" in result, "an RTX sensor delete must say it can be undone a tick later"
+    assert "list_prims" in result["warning"], "the warning should say how to confirm"
+
+
+def test_deleting_a_camera_warns_too():
+    from isaac_sim_mcp_extension.handlers.objects import delete
+
+    result = delete(_SensorAdapter("/World/C", "Camera"), prim_path="/World/C")
+
+    assert "warning" in result
+
+
+def test_deleting_an_ordinary_prim_does_not_warn():
+    """The warning must stay rare enough to mean something."""
+    from isaac_sim_mcp_extension.handlers.objects import delete
+
+    result = delete(_SensorAdapter("/World/Cube", "Cube"), prim_path="/World/Cube")
+
+    assert result["status"] == "success"
+    assert "warning" not in result

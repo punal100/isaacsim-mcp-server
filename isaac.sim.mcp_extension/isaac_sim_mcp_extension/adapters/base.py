@@ -290,11 +290,24 @@ class IsaacAdapterBase(ABC):
             sensor = cache.pop(prim_path, None)
             if sensor is None:
                 continue
-            # 5.1's Camera exposes destroy(); 6.0's CameraSensor/LidarSensor
-            # do not — they expose detach_annotators()/detach_writer() instead.
-            # Try whichever the wrapper actually has, since a release that
-            # silently does nothing leaves the prim undeletable.
-            for method_name in ("destroy", "detach_annotators", "detach_writer"):
+            # Wrapper teardown is named differently on every class, so try
+            # whichever this one actually has.
+            #
+            # Every name here must take NO arguments. That is the whole bug this
+            # list once had: 5.1's LidarRtx has no destroy() and no
+            # detach_annotators(), so the only match was detach_writer — which
+            # is detach_writer(writer_name) and raised TypeError straight into
+            # the except below. Introspected on 5.1.0: the release did nothing
+            # whatsoever for a lidar, leaving the annotator attached (1 before,
+            # 0 after detach_all_annotators) and its render product live for the
+            # life of the Kit process.
+            for method_name in (
+                "destroy",  # 5.1 Camera
+                "detach_all_annotators",  # 5.1 LidarRtx
+                "detach_all_writers",  # 5.1 LidarRtx
+                "detach_annotators",  # 6.0 CameraSensor / LidarSensor
+                "detach_writers",
+            ):
                 method = getattr(sensor, method_name, None)
                 if not callable(method):
                     continue
