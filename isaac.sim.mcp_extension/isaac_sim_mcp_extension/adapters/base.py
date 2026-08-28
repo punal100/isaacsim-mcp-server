@@ -35,6 +35,28 @@ if TYPE_CHECKING:
     from pxr import Usd
 
 
+def collect_prims(root, prim_type: Optional[str] = None, recursive: bool = False) -> List[Dict[str, str]]:
+    """Collect a prim's children, one level deep or through the whole subtree.
+
+    Shallow by default: a listing that expanded a robot would turn a three-row
+    answer into hundreds, and an agent's context is what the summary style of
+    these tools protects.
+
+    When filtering by type, a prim that does not match is still descended into.
+    A camera parented under an Xform is the case that matters — skipping the
+    Xform would report success while missing the very prim the caller asked
+    for, which is the shape of bug this project treats as worst.
+    """
+    results: List[Dict[str, str]] = []
+    for prim in root.GetAllChildren():
+        ptype = str(prim.GetTypeName())
+        if not prim_type or ptype == prim_type:
+            results.append({"path": str(prim.GetPath()), "type": ptype})
+        if recursive:
+            results.extend(collect_prims(prim, prim_type, recursive=True))
+    return results
+
+
 def spherical_to_cartesian(azimuth_deg, elevation_deg, range_m) -> List[List[float]]:
     """Convert a lidar sweep from (azimuth, elevation, range) to sensor-local XYZ.
 
@@ -156,8 +178,13 @@ class IsaacAdapterBase(ABC):
         ...
 
     @abstractmethod
-    def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
-        """List prims under root_path, optionally filtered by type."""
+    def list_prims(
+        self, root_path: str = "/", prim_type: Optional[str] = None, recursive: bool = False
+    ) -> List[Dict[str, str]]:
+        """List prims under root_path, optionally filtered by type.
+
+        Shallow unless `recursive`, which walks the whole subtree.
+        """
         ...
 
     @abstractmethod

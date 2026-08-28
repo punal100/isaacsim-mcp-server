@@ -237,10 +237,19 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environmen
         return {"status": "error", "message": str(e)}
 
 
-def list_prims(adapter: IsaacAdapterBase, root_path: str = "/", prim_type: Optional[str] = None) -> Dict[str, Any]:
+def list_prims(
+    adapter: IsaacAdapterBase,
+    root_path: str = "/",
+    prim_type: Optional[str] = None,
+    recursive: bool = False,
+) -> Dict[str, Any]:
     try:
-        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type)
-        return {"status": "success", "prims": prims}
+        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type, recursive=recursive)
+        # Say which of the two listings this was. The shallow default reads as a
+        # complete answer otherwise: during the 0.6.0 sweep "/World present"
+        # after a clear_scene was taken for an empty scene while a lidar was
+        # still parented under it.
+        return {"status": "success", "prims": prims, "recursive": recursive}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

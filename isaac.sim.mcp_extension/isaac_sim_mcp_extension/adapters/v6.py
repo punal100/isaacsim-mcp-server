@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .base import IsaacAdapterBase, drop_stale_bytecode, spherical_to_cartesian
+from .base import IsaacAdapterBase, collect_prims, drop_stale_bytecode, spherical_to_cartesian
 from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 from .version import version_string
@@ -323,16 +323,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         except Exception:
             return False
 
-    def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
+    def list_prims(
+        self, root_path: str = "/", prim_type: Optional[str] = None, recursive: bool = False
+    ) -> List[Dict[str, str]]:
         stage = self.get_stage()
         root = stage.GetPrimAtPath(root_path)
-        results: List[Dict[str, str]] = []
-        for prim in root.GetAllChildren():
-            ptype = prim.GetTypeName()
-            if prim_type and ptype != prim_type:
-                continue
-            results.append({"path": str(prim.GetPath()), "type": ptype})
-        return results
+        return collect_prims(root, prim_type=prim_type, recursive=recursive)
 
     def get_prim_info(self, prim_path: str) -> Dict[str, Any]:
         stage = self.get_stage()
