@@ -106,3 +106,51 @@ def test_both_adapters_drop_bytecode_before_reloading():
         called = {n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         assert "drop_stale_bytecode" in called, f"{name} reloads without dropping bytecode"
         assert "invalidate_caches" in _adapter_src(name), f"{name} never invalidates import caches"
+
+
+def _reload_script_node(name):
+    tree = ast.parse(_adapter_src(name))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "reload_script":
+            return node
+    raise AssertionError(f"reload_script not found in {name}")
+
+
+def test_caches_are_invalidated_before_the_first_import_too():
+    """A module file created just now is invisible without invalidate_caches().
+
+    Measured on 5.1.0 with the directory already on sys.path:
+
+        import without invalidate      -> ModuleNotFoundError: No module named 'dbgx'
+        import after invalidate_caches -> OK
+
+    Python's FileFinder caches a directory listing, so writing a new controller
+    and calling reload_script(module_name=...) failed outright until something
+    else happened to refresh that cache. Invalidating only inside the reload
+    branch fixed the stale-bytecode case and left this one, which is why the
+    call has to dominate both branches.
+    """
+    for name in ("v5.py", "v6.py"):
+        node = _reload_script_node(name)
+        nested = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.If):
+                for inner in ast.walk(sub):
+                    if (
+                        isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "invalidate_caches"
+                    ):
+                        nested.add(id(inner))
+        all_calls = {
+            id(sub)
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Attribute)
+            and sub.func.attr == "invalidate_caches"
+        }
+        assert all_calls, f"{name}: reload_script never invalidates import caches"
+        assert all_calls - nested, (
+            f"{name}: invalidate_caches() only runs inside a branch, so a newly "
+            f"created module is still invisible on first import"
+        )

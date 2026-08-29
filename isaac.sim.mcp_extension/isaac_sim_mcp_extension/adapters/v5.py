@@ -1443,6 +1443,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
         parent_dir = os.path.dirname(os.path.abspath(file_path))
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
+        # Both branches below need this, not just the reload. Python's
+        # FileFinder caches a directory listing, so a controller written moments
+        # ago is invisible to import_module even with its directory on sys.path
+        # -- measured on 5.1.0: ModuleNotFoundError before invalidate_caches(),
+        # imported fine straight after.
+        importlib.invalidate_caches()
 
         # Clean up previous exec() namespace for this file (unsubscribe orphaned callbacks)
         abs_path = os.path.abspath(file_path)
@@ -1481,7 +1487,6 @@ class IsaacAdapterV5(IsaacAdapterBase):
                     existing = getattr(sys.modules[module_name], "__file__", None)
                     if existing:
                         drop_stale_bytecode(existing)
-                    importlib.invalidate_caches()
                     _module = importlib.reload(sys.modules[module_name])
                     msg = f"Module '{module_name}' reloaded successfully"
                 else:
