@@ -135,6 +135,12 @@ def create(
             count = len(list(stage.TraverseAll()))
             prim_path = f"/World/{object_type}_{count}"
         _prim = adapter.create_prim(prim_path, prim_type=object_type)
+        if color is not None:
+            # Declared, documented and previously dropped on the floor.
+            try:
+                adapter.set_prim_color(prim_path, color)
+            except Exception as exc:
+                print(f"create_object: could not set color on {prim_path}: {exc}")
 
         # USD does not reject an unknown type name — it authors a *typeless*
         # prim, so create_object(object_type="NotAShape") reported

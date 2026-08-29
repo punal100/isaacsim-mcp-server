@@ -481,7 +481,7 @@ class _StageWithPaths:
     """Stage where a set of paths exist, everything else is free."""
 
     def __init__(self, taken):
-        self.taken = dict(taken)   # path -> type name
+        self.taken = dict(taken)  # path -> type name
 
     def GetPrimAtPath(self, path):
         t = self.taken.get(path)
@@ -524,11 +524,13 @@ def test_refusal_names_a_concrete_free_path():
 def test_suggested_path_skips_paths_that_are_also_taken():
     from isaac_sim_mcp_extension.handlers.sensors import create_lidar
 
-    adapter = _SuggestAdapter({
-        "/World/L": "Camera",
-        "/World/L_2": "Camera",
-        "/World/L_3": "OmniLidar",
-    })
+    adapter = _SuggestAdapter(
+        {
+            "/World/L": "Camera",
+            "/World/L_2": "Camera",
+            "/World/L_3": "OmniLidar",
+        }
+    )
     result = create_lidar(adapter, prim_path="/World/L")
 
     assert result["suggested_prim_path"] == "/World/L_4"

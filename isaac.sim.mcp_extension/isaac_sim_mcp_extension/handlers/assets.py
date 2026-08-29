@@ -109,7 +109,10 @@ def search_usd(
         searcher = USDSearch3d()
         url = searcher.search(text_prompt)
         loader = USDLoader()
-        prim_path = loader.load_usd_from_url(url_path=url, target_path=target_path)
+        # location/scale were dropped here while load_usd right above passes
+        # them, so a searched asset landed at the origin at native scale and
+        # reported success.
+        prim_path = loader.load_usd_from_url(url_path=url, target_path=target_path, location=position, scale=scale)
         return {
             "status": "success",
             "message": f"Found and loaded USD for '{text_prompt}'",

@@ -68,9 +68,23 @@ def _isaac_reachable() -> bool:
         return False
 
 
+# These tests MUTATE a running simulator: they clear the scene, delete prims,
+# play and stop the timeline, and create cameras — one of which permanently
+# consumes the 6.0 session's undeletable-first-camera slot (#20).
+#
+# Reachability alone used to arm them, evaluated at import, so `uv run pytest`
+# hit whatever Kit happened to be running. That has produced false bug reports
+# in this repository more than once: a sweep measured a stage the unit suite had
+# quietly rewritten underneath it. Requiring an explicit opt-in makes running
+# them a decision rather than an accident.
+_OPT_IN = os.environ.get("ISAAC_MCP_LIVE_TESTS") == "1"
+
 requires_isaac = pytest.mark.skipif(
-    not _isaac_reachable(),
-    reason="Isaac Sim not running on localhost:8766",
+    not (_OPT_IN and _isaac_reachable()),
+    reason=(
+        "live tests are opt-in: set ISAAC_MCP_LIVE_TESTS=1 with Isaac Sim running "
+        "on localhost:8766. They mutate the running scene."
+    ),
 )
 
 

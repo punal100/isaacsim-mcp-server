@@ -207,3 +207,45 @@ def test_execute_command_error_without_extras_is_unchanged():
     out = ext._execute_command({"type": "t.plain", "params": {}})
 
     assert out == {"status": "error", "message": "just this"}
+
+
+# ── the live integration suite must be opt-in (review process finding) ───────
+
+
+def test_integration_tests_do_not_arm_themselves_from_a_live_socket():
+    """`uv run pytest` must never touch a running Isaac Sim.
+
+    The gate probed localhost:8766 at import, so whenever Kit happened to be up
+    the command CLAUDE.md advertises as "no Isaac Sim needed" silently armed 43
+    destructive tests — clear_scene, deletes, play/stop, and a camera creation
+    that burns the 6.0 session's one undeletable-first-camera slot. This
+    repository's own retraction log names exactly that as a past source of false
+    bug reports, and documenting the hazard did not disarm it.
+
+    Reachability may still be *required* on top, but an explicit opt-in has to
+    come first.
+    """
+    import ast
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "test_integration.py")
+    with open(path) as f:
+        tree = ast.parse(f.read())
+
+    # Names assigned anywhere in the module from an environment read.
+    env_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and ("environ" in ast.dump(node.value) or "getenv" in ast.dump(node.value)):
+            env_names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "requires_isaac" for t in node.targets
+        ):
+            referenced = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+            assert referenced & env_names, (
+                "requires_isaac is decided by probing the socket alone; it must also "
+                f"require an explicit opt-in environment variable (env-derived names: {env_names or 'none'})"
+            )
+            return
+    raise AssertionError("requires_isaac not found")

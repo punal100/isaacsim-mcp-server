@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uv sync                              # install deps (creates .venv)
 uv run pre-commit install            # ruff lint+format on commit
-uv run pytest                        # full unit suite (no Isaac Sim needed)
+uv run pytest                        # unit suite only; live tests skip unless opted in
+ISAAC_MCP_LIVE_TESTS=1 uv run pytest # ALSO runs tests that MUTATE a running Isaac Sim
 uv run pytest tests/test_adapter_v6.py::test_get_adapter_returns_v6_when_version_6   # single test
 uv run ruff check . && uv run ruff format .                                 # what CI enforces
 uv run python add_license_headers.py # prepend the MIT header to new .py files
@@ -43,7 +44,7 @@ MCP client → isaac_mcp/ (FastMCP, stdio) → socket → isaac.sim.mcp_extensio
 
 ### Adding a tool
 
-Five places, in order: `isaac_mcp/tools/<category>.py` → new command string → `handlers/<category>.py` `register()` → abstract method in `adapters/base.py` implemented in **both** `v5.py` and `v6.py` → if you add a new *module*, add it to the reload lists in `scripts/dev_mcp_server.sh` and to both `__init__.py` module lists. `extension.toml` dependencies gate what the extension can import on each version — V6-only extensions must be `{ optional = true }` or 5.1 fails to load.
+Five places, in order: `isaac_mcp/tools/<category>.py` → new command string → `handlers/<category>.py` `register()` → abstract method in `adapters/base.py` implemented in **both** `v5.py` and `v6.py` → if you add a new *module*, add it to the reload lists in `scripts/dev_mcp_server.sh` and to both `__init__.py` module lists. A module the reload list misses is worse than no hot reload at all: `v5`/`v6` bind imported names at module scope, so edits to it stay invisible while everything around it updates, and a live measurement then runs against stale code. `adapters/units.py` and `adapters/transforms.py` were missed exactly this way. `extension.toml` dependencies gate what the extension can import on each version — V6-only extensions must be `{ optional = true }` or 5.1 fails to load.
 
 ## Conventions and traps
 

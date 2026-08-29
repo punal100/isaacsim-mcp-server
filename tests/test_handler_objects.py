@@ -132,3 +132,56 @@ def test_deleting_an_ordinary_prim_does_not_warn():
 
     assert result["status"] == "success"
     assert "warning" not in result
+
+
+# ── create_object(color=...) must reach the prim (review blocker 2) ──────────
+
+
+class _ColorAdapter:
+    def __init__(self):
+        self.colored = []
+        self.created = []
+
+    def get_stage(self):
+        return _SensorStage("", "")
+
+    def create_prim(self, prim_path, prim_type="Xform", **kw):
+        self.created.append(prim_path)
+        return object()
+
+    def set_prim_transform(self, prim_path, **kw):
+        return True
+
+    def get_prim_transform(self, prim_path):
+        return {"position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+
+    def set_prim_color(self, prim_path, color):
+        self.colored.append((prim_path, list(color)))
+
+    def apply_physics(self, *a, **kw):
+        return True
+
+    def get_prim_bounds(self, prim_path):
+        return None
+
+
+def test_create_object_applies_the_colour_it_accepts():
+    """`color` was declared on the handler and used nowhere; `displayColor`
+    appeared in no extension file. The tool documented it, sent it, and returned
+    success for an uncoloured prim — the same silent-success class as the eight
+    tools fixed in 42072b2."""
+    from isaac_sim_mcp_extension.handlers.objects import create
+
+    adapter = _ColorAdapter()
+    create(adapter, object_type="Cube", prim_path="/World/C", size=0.5, color=[1.0, 0.0, 0.0])
+
+    assert adapter.colored == [("/World/C", [1.0, 0.0, 0.0])], "colour never reached the prim"
+
+
+def test_create_object_without_colour_does_not_set_one():
+    from isaac_sim_mcp_extension.handlers.objects import create
+
+    adapter = _ColorAdapter()
+    create(adapter, object_type="Cube", prim_path="/World/C", size=0.5)
+
+    assert adapter.colored == []

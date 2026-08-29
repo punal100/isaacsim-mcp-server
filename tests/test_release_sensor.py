@@ -134,3 +134,53 @@ def test_the_sensor_is_forgotten_either_way():
     adapter.release_sensor("/World/L")
 
     assert "/World/L" not in adapter._lidar_sensors
+
+
+class _V6SensorShaped:
+    """6.0's _SensorRuntime surface, as read from the installed sources.
+
+    CameraSensor and LidarSensor both extend _SensorRuntime. It has no
+    destroy(), no detach_all_annotators() and no detach_all_writers(); the only
+    zero-argument teardown is _invalidate_sensor(), which is what its own
+    __del__ calls. detach_annotators(self, annotators) requires an argument, so
+    calling it bare raises TypeError -- the same trap 5.1's detach_writer set.
+    """
+
+    def __init__(self):
+        self.invalidated = False
+        self.bad_calls = []
+
+    def detach_annotators(self, annotators):
+        self.bad_calls.append("detach_annotators")
+
+    def detach_writer(self, writer_name):
+        self.bad_calls.append("detach_writer")
+
+    def _invalidate_sensor(self):
+        self.invalidated = True
+
+
+def test_v6_sensor_is_actually_torn_down():
+    """Without this, release_all_sensors on every timeline STOP frees nothing on
+    6.0, and only garbage collection eventually runs __del__ -- which is why the
+    leak looked intermittent."""
+    adapter = _Adapter()
+    sensor = _V6SensorShaped()
+    adapter._camera_sensors["/World/C"] = sensor
+
+    adapter.release_sensor("/World/C")
+
+    assert sensor.invalidated, "release_sensor did nothing for a 6.0 sensor"
+
+
+def test_methods_needing_arguments_are_never_called_bare():
+    """The invariant was a comment saying every name must take no arguments, and
+    a comment did not stop detach_annotators being added to the list. Enforce it
+    by inspecting the signature instead."""
+    adapter = _Adapter()
+    sensor = _V6SensorShaped()
+    adapter._camera_sensors["/World/C"] = sensor
+
+    adapter.release_sensor("/World/C")
+
+    assert sensor.bad_calls == [], f"called methods that require arguments: {sensor.bad_calls}"

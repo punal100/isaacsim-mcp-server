@@ -35,6 +35,27 @@ if TYPE_CHECKING:
     from pxr import Usd
 
 
+def _needs_arguments(method) -> bool:
+    """True when calling `method()` with no arguments would raise TypeError.
+
+    Guards the teardown loop in release_sensor. Isaac renames these methods
+    between versions and some of them take the thing to detach, so a name that
+    looks like a teardown can be a silent no-op behind a bare except. Defaults
+    to True when the signature cannot be read: skipping an unknown method is
+    safer than calling it and swallowing the error.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        p.default is inspect.Parameter.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        for p in params
+    )
+
+
 def collect_prims(root, prim_type: Optional[str] = None, recursive: bool = False) -> List[Dict[str, str]]:
     """Collect a prim's children, one level deep or through the whole subtree.
 
@@ -270,6 +291,28 @@ class IsaacAdapterBase(ABC):
 
     # ── Sensor lifecycle ───────────────────────────────────
 
+    def set_prim_color(self, prim_path: str, color: Sequence[float]) -> None:
+        """Author `primvars:displayColor` on a geometric prim.
+
+        create_object accepted `color`, documented it, and dropped it: the
+        parameter was declared on the handler and read nowhere, and
+        displayColor appeared in no file in the extension. The tool returned
+        success for an uncoloured prim.
+
+        Plain UsdGeom, so it is identical on both runtimes and belongs here
+        rather than in either adapter.
+        """
+        from pxr import Gf, UsdGeom
+
+        prim = self.get_stage().GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        gprim = UsdGeom.Gprim(prim)
+        attr = gprim.GetDisplayColorAttr()
+        if not attr:
+            attr = gprim.CreateDisplayColorAttr()
+        attr.Set([Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))])
+
     def release_sensor(self, prim_path: str) -> None:
         """Destroy and forget any cached RTX sensor bound to this prim.
 
@@ -293,23 +336,33 @@ class IsaacAdapterBase(ABC):
             # Wrapper teardown is named differently on every class, so try
             # whichever this one actually has.
             #
-            # Every name here must take NO arguments. That is the whole bug this
-            # list once had: 5.1's LidarRtx has no destroy() and no
-            # detach_annotators(), so the only match was detach_writer — which
-            # is detach_writer(writer_name) and raised TypeError straight into
-            # the except below. Introspected on 5.1.0: the release did nothing
-            # whatsoever for a lidar, leaving the annotator attached (1 before,
-            # 0 after detach_all_annotators) and its render product live for the
-            # life of the Kit process.
+            # A name only counts if it takes no required arguments, and that is
+            # checked rather than asserted in a comment — twice now a name that
+            # needs one has been added here, and calling it bare raises
+            # TypeError straight into the except below, so the release silently
+            # does nothing:
+            #
+            #   5.1 LidarRtx   detach_writer(writer_name)      -> annotator left
+            #                                                      attached, render
+            #                                                      product live for
+            #                                                      the whole session
+            #   6.0 _SensorRuntime
+            #                  detach_annotators(annotators)   -> frees nothing on
+            #                                                      every timeline STOP
+            #
+            # 6.0's only zero-argument teardown is the private _invalidate_sensor,
+            # which is what the class's own __del__ calls — so garbage collection
+            # was masking the leak intermittently. Reaching for it is deliberate:
+            # the public detach_annotators needs the annotator names, which live
+            # in private state anyway.
             for method_name in (
                 "destroy",  # 5.1 Camera
                 "detach_all_annotators",  # 5.1 LidarRtx
                 "detach_all_writers",  # 5.1 LidarRtx
-                "detach_annotators",  # 6.0 CameraSensor / LidarSensor
-                "detach_writers",
+                "_invalidate_sensor",  # 6.0 CameraSensor / LidarSensor
             ):
                 method = getattr(sensor, method_name, None)
-                if not callable(method):
+                if not callable(method) or _needs_arguments(method):
                     continue
                 try:
                     method()
