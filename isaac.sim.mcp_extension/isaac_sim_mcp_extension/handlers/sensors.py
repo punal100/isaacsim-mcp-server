@@ -221,6 +221,28 @@ def create_lidar(
     config: Optional[str] = None,
 ) -> Dict[str, Any]:
     try:
+        # A path that already holds a Camera cannot host a working lidar.
+        # On 5.1 a deleted or cleared lidar leaves its prim behind, resurrected
+        # as a Camera (#25). Creating a lidar there binds LidarRtx to that
+        # Camera and the sensor never yields a single point: measured 0 of 15
+        # reads, twice, on a path that had held a lidar before, while fresh
+        # paths in the same session read 33-40%. Reporting success for that is
+        # how #31 looked like flaky sensor timing for so long — the caller
+        # retries an empty read forever and nothing says why.
+        existing = _prim_type(adapter, prim_path)
+        if existing == "Camera":
+            return {
+                "status": "error",
+                "message": (
+                    f"{prim_path} already holds a Camera prim, left behind by a lidar that was "
+                    "deleted or cleared earlier in this session — Isaac re-creates the prim as a "
+                    "Camera and it cannot be removed. A lidar created here would report success "
+                    "and never return a point. Use a different prim path, or restart Isaac Sim to "
+                    "clear the stray."
+                ),
+                "prim_path": prim_path,
+            }
+
         adapter.create_lidar(prim_path, config=config)
         if position or rotation:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation)

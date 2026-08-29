@@ -391,3 +391,87 @@ def test_v5_never_gets_the_warning():
 
     result = create_camera(_V5Adapter(), prim_path="/World/A1")
     assert "warning" not in result
+
+
+# ── creating a lidar on a poisoned path (issues #25, #31) ────────────────────
+
+
+class _StageWithPrim:
+    def __init__(self, path, type_name):
+        self._path, self._type = path, type_name
+
+    def GetPrimAtPath(self, path):
+        return _LivePrim(self._type) if path == self._path else _GonePrim()
+
+
+class _LivePrim:
+    def __init__(self, t):
+        self._t = t
+
+    def IsValid(self):
+        return True
+
+    def GetTypeName(self):
+        return self._t
+
+
+class _GonePrim:
+    def IsValid(self):
+        return False
+
+    def GetTypeName(self):
+        return ""
+
+
+class _LidarCreateAdapter:
+    def __init__(self, existing_type=None, path="/World/L"):
+        self.stage = _StageWithPrim(path, existing_type) if existing_type else _StageWithPrim("", "")
+        self.created = []
+
+    def get_stage(self):
+        return self.stage
+
+    def create_lidar(self, prim_path, config=None, **kw):
+        self.created.append(prim_path)
+        return object()
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+
+def test_creating_a_lidar_on_a_resurrected_camera_prim_is_refused():
+    """Measured on 5.1.0: a deleted lidar's prim comes back typed Camera (#25).
+
+    Creating a lidar there binds LidarRtx to a Camera prim and the sensor never
+    produces a single point — 0 of 15 reads, repeatedly, while fresh paths in
+    the same session read 33-40%. The tool reported success for that dead
+    sensor, so the caller retried an empty read forever.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter(existing_type="Camera", path="/World/L")
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "error", "a poisoned path must not report success"
+    assert "Camera" in result["message"]
+    assert adapter.created == [], "the dead sensor should not have been built"
+
+
+def test_creating_a_lidar_on_a_free_path_still_works():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter()
+    result = create_lidar(adapter, prim_path="/World/Fresh")
+
+    assert result["status"] == "success"
+    assert adapter.created == ["/World/Fresh"]
+
+
+def test_recreating_a_lidar_on_an_existing_lidar_is_allowed():
+    """Re-creating over a live OmniLidar is the normal cached-sensor path."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter(existing_type="OmniLidar", path="/World/L")
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "success"
