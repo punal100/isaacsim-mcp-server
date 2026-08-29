@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`create_action_graph(inline_script=...)`** — one-step OnPlaybackTick → ScriptNode wiring.
 - **`get_lidar_point_cloud` returns the cloud** — summary by default, `max_points` for a strided sample, `output_path` to write the sweep as `.npy`.
 - **`clear_scene(keep_environment=...)`**; `load_environment` returns the `corrections` USD applied plus `bounds`.
+- **`list_prims(recursive=...)`** walks the whole subtree instead of one level, and the response echoes which listing it gave.
 - **`create_camera` warns on a 6.0 session's first RTX camera**, which cannot be removed for the life of the process.
 
 ### Changed
@@ -47,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree.
 - **Every validation error was reported as a connection failure** — a typo'd prim path or a bad size came back as "Communication error with Isaac", which reads as a transport fault, and the healthy socket was thrown away and redialled on the next call.
 - **`reload_script(module_name=...)` re-ran stale bytecode** — editing a controller and reloading it reported success while the previous version kept running, whenever the edit left the file the same length.
+- **`list_prims` returned only immediate children** while documenting "all prims in the scene", so a camera parented under a robot was invisible to a listing that reported success.
+- **`edit_action_graph` rejected the relative attribute paths its own docstring documents** — every attribute except `usePath`/`scriptPath` failed with `node=None, graph=None`.
+- **A lidar re-created on a path that previously held one never returned a point** — the old prim survives as a `Camera` and the new sensor binds to it, while `create_lidar` reported success.
 
 ### Notes
 - Verified on device on Isaac Sim 5.1.0, 6.0.1 PhysX and 6.0.1 Newton, cold-booted one instance at a time with the GUI.
