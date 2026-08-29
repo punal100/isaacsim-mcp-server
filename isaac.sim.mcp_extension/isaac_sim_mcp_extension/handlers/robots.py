@@ -124,6 +124,29 @@ def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["robots.get_joints"] = lambda **p: get_joints(adapter, **p)
 
 
+def engine_drive_warning(adapter: IsaacAdapterBase) -> Optional[str]:
+    """Warn when the active engine will not track commanded joint targets.
+
+    Newton's drives do not converge (issue #21): the MuJoCo actuator gain cannot
+    be integrated at the configured timestep, and the GPU path runs `mjw_model`
+    rather than the `mj_model` copy reachable from here, so it is not fixable in
+    this repository. Measured on 6.0.1: the FR3 sails past a -0.4 target to
+    -0.736 by 1200 steps and keeps going, and `fr3_joint6` comes to rest outside
+    its own lower limit, while PhysX settles at -0.398 within 150 and holds.
+
+    An unfixable behaviour still has to be signalled at the point of use, or the
+    caller watches an articulation diverge with nothing to say that is expected
+    — the same reason create_camera warns about a camera it cannot delete.
+    """
+    if getattr(adapter, "_engine", None) != "newton":
+        return None
+    return (
+        "Joint drives do not converge on the Newton engine — commanded targets are overshot and "
+        "the joint keeps going, and joint limits are not enforced either. Scene setup, stepping "
+        "and inspection are fine here; run motion work on the PhysX engine (isaac-sim.sh) instead."
+    )
+
+
 def create(
     adapter: IsaacAdapterBase,
     robot_type: str = "franka",
@@ -168,7 +191,10 @@ def create(
         # Check for broken drive configs (zero stiffness + zero damping)
         try:
             joint_config = adapter.get_joint_config(prim_path)
-            warnings = joint_config.get("warnings", [])
+            warnings = list(joint_config.get("warnings", []))
+            engine_warning = engine_drive_warning(adapter)
+            if engine_warning:
+                warnings.append(engine_warning)
             if warnings:
                 result["warnings"] = warnings
         except Exception as e:
