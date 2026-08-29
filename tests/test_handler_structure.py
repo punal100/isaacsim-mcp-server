@@ -154,3 +154,56 @@ def test_v6_implements_all_abstract_methods():
 
     missing = abstract_methods - v6_methods
     assert not missing, f"IsaacAdapterV6 is missing abstract methods: {sorted(missing)}"
+
+
+# ── error envelope preserves structured context ──────────────────────────────
+
+
+def test_execute_command_keeps_extra_fields_on_error():
+    """A handler's structured error context must reach the client.
+
+    The envelope forwarded only `message` on the error branch, so anything a
+    handler added alongside it was silently dropped. Measured live: create_lidar
+    refused a poisoned path and offered `suggested_prim_path`, and the client
+    received None — the one field that lets an agent recover without inventing a
+    prim path. Unit tests call handlers directly and cannot see this; only a
+    round trip through the extension can.
+    """
+    import sys
+    import types
+
+    ext_mod = sys.modules.get("isaac_sim_mcp_extension.extension")
+    if ext_mod is None:
+        import isaac_sim_mcp_extension.extension as ext_mod  # noqa: F401
+
+    ext = ext_mod.MCPExtension.__new__(ext_mod.MCPExtension)
+    ext._registry = {
+        "t.fail": lambda **p: {
+            "status": "error",
+            "message": "nope",
+            "suggested_prim_path": "/World/L_2",
+            "prim_path": "/World/L",
+        }
+    }
+    ext._stage_pending = types.MethodType(lambda self: False, ext)
+
+    out = ext._execute_command({"type": "t.fail", "params": {}})
+
+    assert out["status"] == "error"
+    assert out["message"] == "nope"
+    assert out["suggested_prim_path"] == "/World/L_2", "structured error context was dropped"
+    assert out["prim_path"] == "/World/L"
+
+
+def test_execute_command_error_without_extras_is_unchanged():
+    import types
+
+    import isaac_sim_mcp_extension.extension as ext_mod
+
+    ext = ext_mod.MCPExtension.__new__(ext_mod.MCPExtension)
+    ext._registry = {"t.plain": lambda **p: {"status": "error", "message": "just this"}}
+    ext._stage_pending = types.MethodType(lambda self: False, ext)
+
+    out = ext._execute_command({"type": "t.plain", "params": {}})
+
+    assert out == {"status": "error", "message": "just this"}

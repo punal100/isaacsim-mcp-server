@@ -46,6 +46,15 @@ def _prim_type(adapter: IsaacAdapterBase, prim_path: str) -> str:
         return ""
 
 
+def _free_prim_path(adapter: IsaacAdapterBase, prim_path: str, limit: int = 50) -> str:
+    """First `<prim_path>_N` that no prim occupies, so a refusal can name it."""
+    for n in range(2, limit + 2):
+        candidate = f"{prim_path}_{n}"
+        if not _prim_type(adapter, candidate):
+            return candidate
+    return f"{prim_path}_new"
+
+
 def _first_rtx_camera(adapter: IsaacAdapterBase, prim_path: str) -> bool:
     """True when this is the first RTX camera of the Kit session (V6 only).
 
@@ -231,16 +240,22 @@ def create_lidar(
         # retries an empty read forever and nothing says why.
         existing = _prim_type(adapter, prim_path)
         if existing == "Camera":
+            # Name a path that is actually free. "use a different prim path"
+            # leaves the caller to invent one, and an agent mid-task tends to
+            # retry the same one instead — the error has to carry the next step,
+            # not just the diagnosis.
+            suggested = _free_prim_path(adapter, prim_path)
             return {
                 "status": "error",
                 "message": (
                     f"{prim_path} already holds a Camera prim, left behind by a lidar that was "
                     "deleted or cleared earlier in this session — Isaac re-creates the prim as a "
                     "Camera and it cannot be removed. A lidar created here would report success "
-                    "and never return a point. Use a different prim path, or restart Isaac Sim to "
-                    "clear the stray."
+                    f"and never return a point. Retry with prim_path={suggested!r}, which is free, "
+                    "or restart Isaac Sim to clear the stray."
                 ),
                 "prim_path": prim_path,
+                "suggested_prim_path": suggested,
             }
 
         adapter.create_lidar(prim_path, config=config)

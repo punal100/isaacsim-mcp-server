@@ -475,3 +475,60 @@ def test_recreating_a_lidar_on_an_existing_lidar_is_allowed():
     result = create_lidar(adapter, prim_path="/World/L")
 
     assert result["status"] == "success"
+
+
+class _StageWithPaths:
+    """Stage where a set of paths exist, everything else is free."""
+
+    def __init__(self, taken):
+        self.taken = dict(taken)   # path -> type name
+
+    def GetPrimAtPath(self, path):
+        t = self.taken.get(path)
+        return _LivePrim(t) if t else _GonePrim()
+
+
+class _SuggestAdapter:
+    def __init__(self, taken):
+        self.stage = _StageWithPaths(taken)
+        self.created = []
+
+    def get_stage(self):
+        return self.stage
+
+    def create_lidar(self, prim_path, config=None, **kw):
+        self.created.append(prim_path)
+        return object()
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+
+def test_refusal_names_a_concrete_free_path():
+    """An agent should be able to act on the error without inventing a name.
+
+    "use a different prim path" makes the caller guess, and an agent mid-task
+    may simply retry the same one. Hand it a path that is known to be free.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _SuggestAdapter({"/World/L": "Camera"})
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "error"
+    assert "suggested_prim_path" in result, "the refusal must offer a usable path"
+    assert result["suggested_prim_path"] != "/World/L"
+    assert result["suggested_prim_path"] in result["message"], "and name it in the message"
+
+
+def test_suggested_path_skips_paths_that_are_also_taken():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _SuggestAdapter({
+        "/World/L": "Camera",
+        "/World/L_2": "Camera",
+        "/World/L_3": "OmniLidar",
+    })
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["suggested_prim_path"] == "/World/L_4"
