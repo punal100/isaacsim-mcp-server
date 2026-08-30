@@ -825,7 +825,22 @@ class IsaacAdapterV6(IsaacAdapterBase):
         except Exception:
             pass
         self._guard_newton_unsupported_geometry()
-        SimulationManager.setup_simulation(dt=1.0 / 60.0)
+        # Keep whatever rate is already set. This runs from roughly nine call
+        # sites — every step, joint read and physics-state query — and passing
+        # a fixed dt reset the manager on each one. Measured on 6.0.1:
+        # set_physics_dt(1/240) took effect, then a single get_physics_state
+        # put it back to 1/60 with nothing said. set_physics_params tells the
+        # caller to set the rate through execute_script precisely because no
+        # adapter implements time_step, so this silently undid the documented
+        # workaround.
+        dt = 1.0 / 60.0
+        try:
+            current = SimulationManager.get_physics_dt()
+            if current and float(current) > 0:
+                dt = float(current)
+        except Exception:
+            pass  # no rate to preserve yet, or the manager cannot answer
+        SimulationManager.setup_simulation(dt=dt)
         SimulationManager.initialize_physics()
 
     # Newton builds its model through SolverMuJoCo, whose geom_type_mapping has
