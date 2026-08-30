@@ -112,12 +112,19 @@ def step(
                 ),
             }
         result = adapter.step(num_steps=num_steps, observe_prims=observe_prims, observe_joints=observe_joints)
-        return {
+        out = {
             "status": "success",
             "message": f"Stepped {num_steps} frames",
             "timeline_state": timeline_state,
             **result,
         }
+        # The server instructions call this the debug loop, so it is the joint
+        # read an agent leans on hardest — it has to carry the same provenance
+        # get_joint_positions does. Only when joints were actually observed:
+        # otherwise the tag is noise on every step call.
+        if observe_joints:
+            out = _tag_joint_source(adapter, out)
+        return out
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -194,11 +201,46 @@ def get_physics_state_handler(adapter: IsaacAdapterBase, prim_path: Optional[str
         return {"status": "error", "message": str(e)}
 
 
+_ECHO_WARNING = (
+    "These joint values are authored drive targets, not simulated positions — the physics "
+    "view could not serve the read, so they echo the last set_joint_positions call. A robot "
+    "that looks perfectly converged here may not have moved at all. Step the simulation and "
+    "retry, and check get_isaac_logs."
+)
+
+
+def _tag_joint_source(adapter: IsaacAdapterBase, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach the provenance of a joint read, and a warning when it is an echo.
+
+    get_joint_positions has carried this since the read could fall back to
+    drive targets; the two other paths that read joints did not. That matters
+    most for get_joint_config, which reports
+    position_error = target - actual: when the echo answers, actual *is* the
+    target, so the error is identically 0.0 and reads as perfectly converged at
+    the moment the read is least trustworthy.
+    """
+    try:
+        source = adapter.joint_position_source
+    except Exception:
+        return result
+    result["position_source"] = source
+    if source != getattr(adapter, "JOINT_SOURCE_PHYSICS", "physics"):
+        result["warning"] = _ECHO_WARNING
+    return result
+
+
 def get_joint_config_handler(adapter: IsaacAdapterBase, prim_path: Optional[str] = None) -> Dict[str, Any]:
     try:
         if not prim_path:
             return {"status": "error", "message": "prim_path is required"}
         result = adapter.get_joint_config(prim_path)
+        result = _tag_joint_source(adapter, result)
+        if result.get("position_source") != getattr(adapter, "JOINT_SOURCE_PHYSICS", "physics"):
+            # target - actual is identically zero when actual is the target.
+            # Keeping it would report "converged" for a read that measured
+            # nothing, which is the wrong answer rather than an imprecise one.
+            for joint in result.get("joints", []) or []:
+                joint.pop("position_error", None)
         return {"status": "success", **result}
     except Exception as e:
         return {"status": "error", "message": str(e)}
