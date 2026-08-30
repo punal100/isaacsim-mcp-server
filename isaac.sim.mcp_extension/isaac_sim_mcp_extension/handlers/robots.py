@@ -138,7 +138,7 @@ def engine_drive_warning(adapter: IsaacAdapterBase) -> Optional[str]:
     caller watches an articulation diverge with nothing to say that is expected
     — the same reason create_camera warns about a camera it cannot delete.
     """
-    if getattr(adapter, "_engine", None) != "newton":
+    if adapter.engine != adapter.ENGINE_NEWTON:
         return None
     return (
         "Joint drives do not converge on the Newton engine — commanded targets are overshot and "
@@ -294,7 +294,19 @@ def set_joints(
                 ),
             }
         adapter.set_joint_positions(prim_path, joint_positions, joint_indices)
-        return {"status": "success", "message": f"Set joint positions on {prim_path}"}
+        # Mirror what get_joints does for reads. A drive-target write is not a
+        # failure, but it is not a command the solver has seen either, and a
+        # flat success for both is what let "the robot did not move" look like
+        # a physics problem rather than a write that never landed.
+        source = adapter.joint_command_source
+        result = {"status": "success", "message": f"Set joint positions on {prim_path}", "command_source": source}
+        if source != adapter.JOINT_COMMAND_ARTICULATION:
+            result["warning"] = (
+                "The live articulation did not take this command — the values were written to USD "
+                "drive targets instead, which move nothing until physics is initialized again. "
+                "Step the simulation and read the joints back to confirm, and check get_isaac_logs."
+            )
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

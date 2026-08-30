@@ -288,6 +288,21 @@ Handlers -> Adapter -> Isaac Sim 5.1 / 6.0 APIs
 
 ---
 
+## Known Limitations
+
+Open defects in 0.6.0 that a normal session can hit. Each is warned about at the
+point of use where that is possible; this list is for choosing a runtime before
+you start.
+
+| Affects | What happens | Issue |
+|---|---|---|
+| 6.0 Newton | Joint drives do not converge — a commanded target is overshot and the joint keeps going, and joint limits are not enforced. Scene setup, stepping and inspection are fine; run motion work on PhysX (`isaac-sim.sh`). | [#21](https://github.com/whats2000/isaacsim-mcp-server/issues/21) |
+| 6.0 | The first RTX camera created in a session cannot be removed. `create_camera` warns once when it hands you that camera. | [#20](https://github.com/whats2000/isaacsim-mcp-server/issues/20) |
+| 5.1 | `get_lidar_point_cloud` fills on roughly a third of reads, so a caller must retry. A lidar created while the timeline is running never fills at all — create it stopped. | [#31](https://github.com/whats2000/isaacsim-mcp-server/issues/31) |
+| 5.1 | An RTX lidar prim cannot be deleted; the prim is left behind as a `Camera`. `create_lidar` refuses such a path and names a free one. | [#25](https://github.com/whats2000/isaacsim-mcp-server/issues/25) |
+
+---
+
 ## Example Prompts
 
 **Scene bootstrap**

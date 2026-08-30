@@ -219,4 +219,8 @@ def test_edit_action_graph_rejects_a_call_with_nothing_to_do():
     out = edit_action_graph(object(), graph_path="/World/G")
 
     assert out["status"] == "error"
+    # Pin the specific refusal. `status == "error"` alone is satisfied by any
+    # unrelated failure -- with the guard removed this call falls through to an
+    # `import omni.graph` that also errors, which would look like a pass.
+    assert "Nothing to change" in out["message"]
     assert "values" in out["message"] and "connections" in out["message"]

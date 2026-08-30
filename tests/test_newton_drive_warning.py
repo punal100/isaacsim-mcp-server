@@ -40,11 +40,13 @@ import os
 
 
 class _Engine:
-    """Only what the warning helper reads."""
+    """Only what the warning helper reads: the public `engine` property."""
+
+    ENGINE_NEWTON = "newton"
 
     def __init__(self, engine):
-        if engine is not None:
-            self._engine = engine
+        # None models V5, whose base-class answer is PhysX rather than absence.
+        self.engine = engine if engine is not None else "physx"
 
 
 def test_newton_is_warned_about_drive_divergence():
@@ -65,7 +67,7 @@ def test_physx_is_not_warned():
 
 
 def test_v5_is_not_warned():
-    """5.1 has no _engine attribute at all and converges normally."""
+    """5.1 is PhysX-only through the base adapter and converges normally."""
     from isaac_sim_mcp_extension.handlers.robots import engine_drive_warning
 
     assert engine_drive_warning(_Engine(None)) is None

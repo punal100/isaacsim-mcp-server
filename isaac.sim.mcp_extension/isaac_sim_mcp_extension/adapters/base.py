@@ -624,6 +624,58 @@ class IsaacAdapterBase(ABC):
         """Where the last get_joint_positions answer came from."""
         return getattr(self, "_joint_position_source", self.JOINT_SOURCE_PHYSICS)
 
+    # The same distinction for writes. When the articulation command fails the
+    # adapters fall back to authoring USD drive targets, which move nothing
+    # until the next initialize -- so "commanded the live articulation" and
+    # "wrote a target the solver has not seen" are different outcomes and the
+    # caller has to be able to tell them apart. Reads gained this first; a
+    # write reported flat success either way.
+    # Which physics engine this runtime is on, and the capabilities that follow
+    # from it. Handlers were asking with getattr(adapter, "_engine", ...) -- a
+    # V6-only property -- and used two different fallbacks for V5, so the same
+    # question had two answers depending on which handler asked. Version- and
+    # engine-specific behaviour belongs behind an adapter member.
+    ENGINE_PHYSX = "physx"
+    ENGINE_NEWTON = "newton"
+
+    @property
+    def engine(self) -> str:
+        """The active physics engine. PhysX unless an adapter says otherwise."""
+        return self.ENGINE_PHYSX
+
+    def strands_first_rtx_camera(self) -> bool:
+        """True where the session's first RTX camera cannot be removed (#20).
+
+        6.0 only. V5 removes every camera, so warning there would be false.
+        """
+        return False
+
+    def note_first_rtx_camera(self, prim_path: str) -> bool:
+        """Claim the once-per-session first-RTX-camera warning for this path.
+
+        Returns True exactly once per session, and only where the defect
+        applies. The flag lives here rather than on the handler because V6
+        empties its sensor caches on every timeline STOP -- keying off a cache
+        made every play/stop cycle announce a new "first" camera.
+        """
+        if not self.strands_first_rtx_camera():
+            return False
+        if getattr(self, "_first_rtx_camera_path", None) is not None:
+            return False
+        self._first_rtx_camera_path = prim_path
+        return True
+
+    JOINT_COMMAND_ARTICULATION = "articulation"
+    JOINT_COMMAND_DRIVE_TARGETS = "drive_targets"
+
+    def _note_joint_command_source(self, source: str) -> None:
+        self._joint_command_source = source
+
+    @property
+    def joint_command_source(self) -> str:
+        """How the last set_joint_positions call reached the robot."""
+        return getattr(self, "_joint_command_source", self.JOINT_COMMAND_ARTICULATION)
+
     def _stage_has_physics_scene(self) -> bool:
         """True when the stage carries at least one PhysicsScene prim."""
         try:

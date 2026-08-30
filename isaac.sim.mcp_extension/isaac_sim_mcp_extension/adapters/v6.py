@@ -125,6 +125,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
             pass
 
     @property
+    def engine(self) -> str:
+        """Public form of `_engine`, which the base declares and handlers ask.
+
+        Kept as a thin alias: `_engine` has a dozen callers inside this adapter
+        and its docstring carries the boot-order evidence for why it must stay
+        a live read.
+        """
+        return self._engine
+
+    def strands_first_rtx_camera(self) -> bool:
+        """6.0 cannot remove the first RTX camera of a session (#20)."""
+        return True
+
+    @property
     def _engine(self) -> str:
         """Active physics backend: "physx" | "newton" | "remotesim" | "unknown".
 
@@ -604,6 +618,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
             return True
 
         _result, applied = self._try_articulation(_apply)
+        # Record which one landed -- see the V5 note. A drive target does not
+        # reach the solver until physics initializes again, and on Newton that
+        # is the difference between a command and a no-op.
+        self._note_joint_command_source(
+            self.JOINT_COMMAND_ARTICULATION if applied else self.JOINT_COMMAND_DRIVE_TARGETS
+        )
         if applied:
             return
         # USD-drive fallback (sim stopped / articulation not yet initialised)
@@ -1287,6 +1307,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         if has_rb:
             lin_vel = [0.0, 0.0, 0.0]
             ang_vel = [0.0, 0.0, 0.0]
+            # Pre-seeded zeros made "no physics view", "view invalidated" and
+            # "genuinely at rest" indistinguishable: a moving body read as
+            # stationary with nothing said. V5 reports velocity_warning for its
+            # own version of this (PhysX write-back disabled); say so here too
+            # rather than passing an unmeasured zero off as a measurement.
+            measured = False
             try:
                 from isaacsim.core.simulation_manager import SimulationManager
 
@@ -1299,10 +1325,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
                         flat = arr.reshape(-1)[:6]
                         lin_vel = [float(flat[0]), float(flat[1]), float(flat[2])]
                         ang_vel = [float(flat[3]), float(flat[4]), float(flat[5])]
+                        measured = True
             except Exception:
                 pass
             result["linear_velocity"] = lin_vel
             result["angular_velocity"] = ang_vel
+            if not measured:
+                result["velocity_warning"] = (
+                    "The physics tensor view could not serve this read, so the velocities above "
+                    "are placeholder zeros, not a measurement -- a moving body looks identical to "
+                    "one at rest. Step the simulation at least once, and check get_isaac_logs."
+                )
 
         result["contacts"] = []
         return result

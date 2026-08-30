@@ -314,7 +314,7 @@ def test_v6_lidar_decodes_the_generic_model_output_buffer(monkeypatch):
 
 
 class _V6CameraAdapter:
-    """V6-shaped adapter: has _engine, caches cameras, releases them on stop.
+    """V6-shaped adapter: strands its first camera, caches them, releases on stop.
 
     Mirrors the real thing closely enough to reproduce #29: V6 subscribes to the
     timeline STOP event and calls release_all_sensors(), which empties
@@ -323,7 +323,16 @@ class _V6CameraAdapter:
     camera has ever been created.
     """
 
-    _engine = "physx"
+    def strands_first_rtx_camera(self):
+        return True
+
+    def note_first_rtx_camera(self, prim_path):
+        if not self.strands_first_rtx_camera():
+            return False
+        if getattr(self, "_first_rtx_camera_path", None) is not None:
+            return False
+        self._first_rtx_camera_path = prim_path
+        return True
 
     def __init__(self):
         self._camera_sensors = {}
@@ -387,7 +396,8 @@ def test_v5_never_gets_the_warning():
     from isaac_sim_mcp_extension.handlers.sensors import create_camera
 
     class _V5Adapter(_V6CameraAdapter):
-        _engine = None
+        def strands_first_rtx_camera(self):
+            return False
 
     result = create_camera(_V5Adapter(), prim_path="/World/A1")
     assert "warning" not in result
@@ -534,3 +544,63 @@ def test_suggested_path_skips_paths_that_are_also_taken():
     result = create_lidar(adapter, prim_path="/World/L")
 
     assert result["suggested_prim_path"] == "/World/L_4"
+
+
+# ── a lidar created while the timeline plays never binds (issue #31) ─────────
+
+
+class _LidarTimelineAdapter:
+    """Records the create; reports whatever timeline state it is given."""
+
+    SUPPORTS_LIDAR_CONFIG = True
+
+    def __init__(self, timeline_state, supports_config=True):
+        self._timeline_state = timeline_state
+        self.SUPPORTS_LIDAR_CONFIG = supports_config
+        self.created = []
+
+    def get_simulation_state(self):
+        return {"timeline_state": self._timeline_state}
+
+    def create_lidar(self, prim_path, config=None):
+        self.created.append((prim_path, config))
+
+    def get_stage(self):
+        return None
+
+
+def test_lidar_created_while_playing_is_flagged():
+    """#31: the annotators only bind when the sensor is created on a stopped
+    timeline. Created mid-play it never fills, and the tool's own advice is to
+    retry an empty read — which never succeeds."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarTimelineAdapter("playing")
+
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "success"
+    assert adapter.created, "the lidar should still be created"
+    assert "warning" in result
+    assert "stop" in result["warning"].lower()
+
+
+def test_lidar_created_while_stopped_is_not_flagged():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    result = create_lidar(_LidarTimelineAdapter("stopped"), prim_path="/World/L")
+
+    assert result["status"] == "success"
+    assert "warning" not in result
+
+
+def test_both_lidar_warnings_survive_together():
+    """A dropped config and a playing timeline are independent problems."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarTimelineAdapter("playing", supports_config=False)
+
+    result = create_lidar(adapter, prim_path="/World/L", config="Example_Rotary")
+
+    assert "Example_Rotary" in result["warning"], "the dropped config warning was lost"
+    assert "stop" in result["warning"].lower(), "the timeline warning was lost"

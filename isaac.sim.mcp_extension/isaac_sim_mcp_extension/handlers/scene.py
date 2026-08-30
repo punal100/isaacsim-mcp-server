@@ -109,7 +109,9 @@ def create_physics(
         # 2.000 where it had landed at 0.149, even though step reported the
         # rebuild. Scenes containing a robot were unaffected, which is exactly
         # the kind of partial break that ships unnoticed.
-        if getattr(adapter, "_engine", "physx") != "newton":
+        # NOTE: an engine that cannot be identified ("unknown") primes, as
+        # it always has -- V6 answers "unknown" whenever detection fails.
+        if adapter.engine != adapter.ENGINE_NEWTON:
             adapter._ensure_physics_world()
         return {"status": "success", "message": f"Physics scene created at {scene_path}"}
     except Exception as e:

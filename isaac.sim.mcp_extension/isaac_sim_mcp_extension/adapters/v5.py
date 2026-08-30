@@ -570,6 +570,13 @@ class IsaacAdapterV5(IsaacAdapterBase):
             return True
 
         _result, applied = self._try_articulation(_apply)
+        # Record which one landed. A drive target is authored into USD and does
+        # not reach the solver until physics initializes again, so the caller
+        # has to be able to tell it from a live articulation command -- the
+        # handler reported the same success for both.
+        self._note_joint_command_source(
+            self.JOINT_COMMAND_ARTICULATION if applied else self.JOINT_COMMAND_DRIVE_TARGETS
+        )
         if not applied:
             # Fallback: set USD drive targets directly (works when sim is stopped)
             self._set_joint_drive_targets(prim_path, positions, joint_indices)

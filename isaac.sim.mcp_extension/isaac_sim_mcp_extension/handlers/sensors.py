@@ -71,13 +71,8 @@ def _first_rtx_camera(adapter: IsaacAdapterBase, prim_path: str) -> bool:
 
     So record it once, on the adapter, on a name nothing else clears.
     """
-    if getattr(adapter, "_engine", None) is None:
-        return False  # V5 has no _engine property at all
     try:
-        if getattr(adapter, "_first_rtx_camera_path", None) is not None:
-            return False
-        adapter._first_rtx_camera_path = prim_path
-        return True
+        return adapter.note_first_rtx_camera(prim_path)
     except Exception:
         return False
 
@@ -222,6 +217,18 @@ def capture_image(
         return {"status": "error", "message": str(e)}
 
 
+def _timeline_is_live(adapter: IsaacAdapterBase) -> bool:
+    """True when the timeline is playing or paused mid-run.
+
+    Best effort: an adapter that cannot answer must not block the create.
+    """
+    try:
+        state = (adapter.get_simulation_state() or {}).get("timeline_state")
+    except Exception:
+        return False
+    return state in ("playing", "paused")
+
+
 def create_lidar(
     adapter: IsaacAdapterBase,
     prim_path: str = "/World/Lidar",
@@ -262,15 +269,29 @@ def create_lidar(
         if position or rotation:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation)
         result = {"status": "success", "message": f"Lidar created at {prim_path}", "prim_path": prim_path}
+        warnings = []
         if config and not getattr(adapter, "SUPPORTS_LIDAR_CONFIG", True):
             # Asking for a hardware model and silently receiving a generic
             # sensor is a wrong answer, not a lesser one.
-            result["warning"] = (
+            warnings.append(
                 f"config={config!r} was not applied: this Isaac Sim version creates a generic "
                 "lidar and sets hardware presets as schema attributes afterwards, which this tool "
                 "does not do. The sensor works, but it is not the requested model — set the "
                 "omni:sensor:* attributes with execute_script if the preset matters."
             )
+        # The annotators bind to a render product only for a sensor created on a
+        # stopped timeline (#31). Created mid-play it never fills, and the empty
+        # read then sends the caller into the "retry, several attempts is
+        # normal" loop, which cannot succeed for this sensor.
+        if _timeline_is_live(adapter):
+            warnings.append(
+                "This lidar was created while the timeline was running, and its annotators bind "
+                "to a render product only when the sensor is created on a stopped timeline — it "
+                "will very likely never return a point. Call stop_simulation, delete this prim, "
+                "and create the lidar again before reading it."
+            )
+        if warnings:
+            result["warning"] = " ".join(warnings)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
