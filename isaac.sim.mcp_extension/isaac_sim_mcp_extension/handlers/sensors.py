@@ -261,7 +261,17 @@ def create_lidar(
         adapter.create_lidar(prim_path, config=config)
         if position or rotation:
             adapter.set_prim_transform(prim_path, position=position, rotation=rotation)
-        return {"status": "success", "message": f"Lidar created at {prim_path}", "prim_path": prim_path}
+        result = {"status": "success", "message": f"Lidar created at {prim_path}", "prim_path": prim_path}
+        if config and not getattr(adapter, "SUPPORTS_LIDAR_CONFIG", True):
+            # Asking for a hardware model and silently receiving a generic
+            # sensor is a wrong answer, not a lesser one.
+            result["warning"] = (
+                f"config={config!r} was not applied: this Isaac Sim version creates a generic "
+                "lidar and sets hardware presets as schema attributes afterwards, which this tool "
+                "does not do. The sensor works, but it is not the requested model — set the "
+                "omni:sensor:* attributes with execute_script if the preset matters."
+            )
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

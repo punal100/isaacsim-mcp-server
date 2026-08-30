@@ -181,17 +181,36 @@ def create(
             "prim_path": prim_path,
             "robot_key": match["key"],
         }
+        joint_read_problem = None
         try:
             info = adapter.get_robot_joint_info(prim_path)
             result["joint_names"] = info.get("joint_names", [])
             result["num_dof"] = info.get("num_dof", 0)
+            # V6 does not raise for an asset that failed to resolve — it falls
+            # back to a USD walk and answers 0 DOF — so a robot that is not
+            # there reads as a successful create, with the tool still promising
+            # joint_names and num_dof.
+            if not result["num_dof"]:
+                joint_read_problem = (
+                    f"{prim_path} was created but reports 0 joints. The robot asset most likely did "
+                    "not resolve — check get_isaac_logs, confirm the asset server is reachable, and "
+                    "verify with get_robot_info before commanding joints."
+                )
         except Exception as e:
+            # Previously printed to Kit's log and swallowed, so the response
+            # promised joint_names and num_dof and carried neither.
             print(f"create_robot: get_robot_joint_info failed for {prim_path}: {e}")
             traceback.print_exc()
+            joint_read_problem = (
+                f"Could not read joints from {prim_path}: {e}. The prim exists but its articulation "
+                "could not be inspected, so joint_names and num_dof are missing from this response."
+            )
         # Check for broken drive configs (zero stiffness + zero damping)
         try:
             joint_config = adapter.get_joint_config(prim_path)
             warnings = list(joint_config.get("warnings", []))
+            if joint_read_problem:
+                warnings.append(joint_read_problem)
             engine_warning = engine_drive_warning(adapter)
             if engine_warning:
                 warnings.append(engine_warning)
@@ -200,6 +219,8 @@ def create(
         except Exception as e:
             print(f"create_robot: get_joint_config failed for {prim_path}: {e}")
             traceback.print_exc()
+            if joint_read_problem:
+                result.setdefault("warnings", []).append(joint_read_problem)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

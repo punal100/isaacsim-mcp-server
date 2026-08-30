@@ -25,6 +25,7 @@
 
 import ast
 import os
+import textwrap
 
 ADAPTERS = os.path.join(
     os.path.dirname(__file__),
@@ -44,10 +45,32 @@ def _stop_body_src(filename):
     return ""
 
 
-def test_v6_stop_resets_physics():
+def test_v6_stop_restores_spawn_state_via_the_timeline():
+    """`assert "reset" in src.lower()` passed on a comment, so it could not fail.
+
+    It also described the wrong mechanism. v6.stop() deliberately calls only
+    timeline.stop(), which already restores rigid bodies and articulations to
+    their spawn pose. A SimulationManager.reset_simulation() call used to sit
+    here and was removed: the attribute does not exist, so it raised on every
+    stop into a bare except.
+
+    So assert the two things that are actually true — the timeline is stopped,
+    and the call that never worked has not come back.
+    """
+    import ast
+
     src = _stop_body_src("v6.py")
-    assert "reset" in src.lower()
-    assert "stop()" in src  # still stops the timeline first
+    tree = ast.parse(textwrap.dedent(src))
+
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            called.add(node.func.attr)
+
+    assert "stop" in called, f"stop() no longer stops the timeline; calls={sorted(called)}"
+    assert "reset_simulation" not in called, (
+        "SimulationManager.reset_simulation() is back; it does not exist on 6.0 and raises on every stop"
+    )
 
 
 def test_v6_arm_reset_point_lands_the_transition_before_returning():

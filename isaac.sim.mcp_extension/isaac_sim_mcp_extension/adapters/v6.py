@@ -1415,6 +1415,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
             return np.zeros((0,), dtype=np.uint8)
         return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
 
+    # 6.0's Lidar constructor takes only a path; presets are schema
+    # attributes applied afterwards, so the bare constructor yields a generic
+    # sensor. Measured on 6.0.1: config="Example_Rotary" and no config both
+    # produce model=LidarCore, channels=128.
+    SUPPORTS_LIDAR_CONFIG = False
+
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
         # 6.0 Lidar takes a single `path: str`. Hardware preset (formerly the
         # `config` arg) is now set through schema attributes after creation;

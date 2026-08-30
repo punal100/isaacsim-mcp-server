@@ -447,6 +447,15 @@ def load_environment(
             result["corrections"] = corrections
         if bounds:
             result["bounds"] = bounds
+        else:
+            # bounds carry floor_height, which is what lets a caller place
+            # objects on the ground. Omitting them silently left the caller to
+            # guess z on a stage whose scale it has not seen.
+            result["warning"] = (
+                "Could not compute bounds for this environment, so extent and floor_height are "
+                "missing from this response. Query a specific prim with get_prim_info before "
+                "placing objects, rather than assuming the ground is at z=0."
+            )
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -1003,6 +1003,9 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
     # 5.1 exposes the decoded point cloud through this annotator; 6.0 replaced
     # it with a packed generic-model-output buffer (see v6.get_lidar_point_cloud).
+    # 5.1's LidarRtx takes config_file_name and applies the preset.
+    SUPPORTS_LIDAR_CONFIG = True
+
     LIDAR_POINT_CLOUD_ANNOTATOR = "IsaacExtractRTXSensorPointCloudNoAccumulator"
 
     def _lidar_sensor(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:

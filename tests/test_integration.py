@@ -385,8 +385,10 @@ class TestRobotTools:
             },
         )
         resp = send(conn, "robots.get_info", {"prim_path": "/InfoFranka"})
-        # May need physics initialized to get full info
-        assert resp["status"] in ("success", "error")
+        assert resp["status"] == "success", f"Failed: {resp}"
+        info = resp["result"]
+        assert info.get("num_dof", 0) > 0, f"robot reported no joints: {info}"
+        assert info.get("joint_names"), f"robot reported no joint names: {info}"
 
 
 # ── Material Tools ────────────────────────────────────────
@@ -485,8 +487,13 @@ class TestSensorTools:
                 "prim_path": "/World/CapCamera",
             },
         )
-        # Capture may require simulation to be running; accept both success and error
-        assert resp["status"] in ("success", "error")
+        # RTX capture legitimately needs a rendered frame, so an empty read is a
+        # valid outcome here — but only that one. Accepting any error at all let
+        # this stay green through unrelated breakage.
+        if resp["status"] == "error":
+            assert "frame" in resp["message"].lower(), f"unexpected capture failure: {resp}"
+        else:
+            assert resp["result"].get("output_path") or resp["result"].get("message")
 
     def test_create_lidar(self, conn: IsaacConnection) -> None:
         resp = send(
@@ -497,8 +504,11 @@ class TestSensorTools:
                 "position": [0.0, 0.0, 2.0],
             },
         )
-        # Lidar creation may vary by Isaac Sim config
-        assert resp["status"] in ("success", "error")
+        # This assertion used to accept either outcome, and stayed green through
+        # an entire period when both lidar tools raised on every call on 5.1.
+        # Creating a lidar on a free path works on every supported runtime.
+        assert resp["status"] == "success", f"Failed: {resp}"
+        assert resp["result"]["prim_path"] == "/World/TestLidar"
 
 
 # ── Asset Tools ───────────────────────────────────────────
@@ -591,8 +601,10 @@ class TestSimulationTools:
                 "code": "raise ValueError('test error')",
             },
         )
-        # Script errors should be caught and returned
-        assert resp["status"] in ("success", "error")
+        # The point of this test is that a raising script is reported as an
+        # error rather than swallowed; accepting success defeated it entirely.
+        assert resp["status"] == "error", f"a raising script reported success: {resp}"
+        assert "test error" in resp["message"], f"the script's own message was lost: {resp}"
 
     def test_execute_script_missing_code(self, conn: IsaacConnection) -> None:
         resp = send(conn, "simulation.execute_script", {})

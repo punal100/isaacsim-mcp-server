@@ -151,3 +151,21 @@ def test_edit_action_graph_resolves_every_attribute_not_just_usepath():
             )
             return
     raise AssertionError("edit_action_graph not found")
+
+
+def test_create_action_graph_reports_a_failed_script_attach():
+    """Every step of the attach is conditional and each failed silently, so a
+    graph could be created, report success, then tick and do nothing."""
+    import ast
+
+    tree = ast.parse(_handler_src())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "create_action_graph":
+            src = ast.dump(node)
+            assert "script_attached" in src, "the attach result is not tracked"
+            # and it must be able to produce an error, not just a success
+            returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+            dumped = " ".join(ast.dump(r) for r in returns)
+            assert "could not be attached" in dumped, "a failed attach still reports success"
+            return
+    raise AssertionError("create_action_graph not found")

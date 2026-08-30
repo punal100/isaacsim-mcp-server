@@ -172,7 +172,13 @@ def create_action_graph(
         created_node_paths = [n.get_prim_path() for n in new_nodes] if new_nodes else []
 
         # ── attach script via direct attribute set ─────────────────
+        # Every step here is conditional, and each condition used to fail
+        # silently: a missing ScriptNode or an unresolvable attribute left the
+        # script unattached while the graph still reported success. The caller
+        # then played a graph that ticked and did nothing.
+        script_attached = None
         if (script_file is not None or inline_script is not None) and graph is not None:
+            script_attached = False
             script_node = graph.get_node(f"{graph_path}/ScriptNode")
             if script_node is not None and script_node.is_valid():
                 use_path_attr = script_node.get_attribute("inputs:usePath")
@@ -182,12 +188,28 @@ def create_action_graph(
                         og.Controller.set(use_path_attr, True)
                     if script_path_attr is not None and script_path_attr.is_valid():
                         og.Controller.set(script_path_attr, script_file)
+                        script_attached = True
                 else:  # inline_script
                     script_attr = script_node.get_attribute("inputs:script")
                     if use_path_attr is not None and use_path_attr.is_valid():
                         og.Controller.set(use_path_attr, False)
                     if script_attr is not None and script_attr.is_valid():
                         og.Controller.set(script_attr, inline_script)
+                        script_attached = True
+
+        if script_attached is False:
+            return {
+                "status": "error",
+                "message": (
+                    f"Action Graph created at {graph_path}, but the script could not be attached — "
+                    "its ScriptNode or the inputs:script/scriptPath attribute could not be resolved. "
+                    "The graph would tick and do nothing. Inspect it with list_prims and attach the "
+                    "script with edit_action_graph."
+                ),
+                "graph_path": graph_path,
+                "node_count": len(created_node_paths),
+                "nodes": created_node_paths,
+            }
 
         return {
             "status": "success",
@@ -217,6 +239,15 @@ def edit_action_graph(
     When script content or script path is changed, automatically resets
     state:omni_initialized to False to force the ScriptNode to reload.
     """
+    if not values and not connections:
+        # Reported "Updated graph" for a call carrying neither, so a caller that
+        # built its payload wrong was told the edit landed.
+        return {
+            "status": "error",
+            "message": (
+                "Nothing to change: pass `values` to set attributes or `connections` to wire nodes. Both were empty."
+            ),
+        }
     try:
         import omni.graph.core as og
 
