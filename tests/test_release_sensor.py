@@ -88,17 +88,31 @@ class _Adapter(IsaacAdapterBase):
 _Adapter.__abstractmethods__ = frozenset()
 
 
-def test_lidar_wrapper_is_actually_torn_down():
+def test_51_lidar_is_deliberately_not_torn_down():
+    """5.1's LidarRtx teardown works and is deliberately not called.
+
+    detach_all_annotators() does detach — 1 attached before, 0 after — but
+    calling it hangs Kit. Measured on 5.1.0 from a cold boot, looping
+    create_lidar + clear_scene: wedged on round 0 with it (twice, in two
+    different sequences), against round 4 in one run and no wedge in five in
+    another without it. A pre-existing intermittent hang becomes immediate and
+    reliable.
+
+    It buys nothing to pay for that. The 5.1 lidar prim survives clear_scene
+    regardless (#25), its render products leak either way, and a fresh path
+    reads 33% with or without it (#31) — the fill-rate gain once credited to
+    this call was really the poisoned-path fix.
+
+    Revisit if the underlying hang is ever fixed upstream.
+    """
     adapter = _Adapter()
     lidar = _LidarRtxShaped()
     adapter._lidar_sensors["/World/L"] = lidar
 
     adapter.release_sensor("/World/L")
 
-    assert lidar.annotators_attached == 0, (
-        "release_sensor left the annotator attached; its render product keeps rendering for the life of the process"
-    )
-    assert "detach_all_annotators" in lidar.calls
+    assert lidar.calls == [], f"a 5.1 lidar teardown was called: {lidar.calls}"
+    assert "/World/L" not in adapter._lidar_sensors, "the wrapper must still be forgotten"
 
 
 def test_camera_still_uses_destroy():

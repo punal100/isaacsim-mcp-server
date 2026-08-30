@@ -361,9 +361,21 @@ class IsaacAdapterBase(ABC):
             # in private state anyway.
             for method_name in (
                 "destroy",  # 5.1 Camera
-                "detach_all_annotators",  # 5.1 LidarRtx
-                "detach_all_writers",  # 5.1 LidarRtx
                 "_invalidate_sensor",  # 6.0 CameraSensor / LidarSensor
+                # Deliberately NOT 5.1 LidarRtx's detach_all_annotators /
+                # detach_all_writers. They work — the annotator count goes 1 to 0
+                # — and calling them hangs Kit. Measured on 5.1.0, cold boot, a
+                # create_lidar + clear_scene loop:
+                #
+                #   with them:     wedged on round 0, twice, in two sequences
+                #   without them:  round 4 in one run, no wedge in five in another
+                #
+                # So a pre-existing intermittent hang on this runtime becomes
+                # immediate and reliable. The teardown buys nothing to pay for
+                # that: the 5.1 lidar prim survives clear_scene regardless (#25),
+                # its render products leak either way, and a fresh path reads
+                # 33% with or without it (#31). A leak is bounded; a wedged
+                # extension takes the session and needs a kill -9.
             ):
                 method = getattr(sensor, method_name, None)
                 if not callable(method) or _needs_arguments(method):
