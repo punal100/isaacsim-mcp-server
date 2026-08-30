@@ -40,16 +40,20 @@ def _needs_arguments(method) -> bool:
 
     Guards the teardown loop in release_sensor. Isaac renames these methods
     between versions and some of them take the thing to detach, so a name that
-    looks like a teardown can be a silent no-op behind a bare except. Defaults
-    to True when the signature cannot be read: skipping an unknown method is
-    safer than calling it and swallowing the error.
+    looks like a teardown can be a silent no-op behind a bare except.
+
+    When the signature cannot be read — C-implemented wrappers raise here — say
+    it takes none, so the caller tries it. The two failure modes are not
+    symmetric: calling a method that turns out to need an argument costs a
+    TypeError the call site already swallows, while skipping a real zero-arg
+    teardown reintroduces the exact silent no-op this guard exists to prevent.
     """
     import inspect
 
     try:
         params = inspect.signature(method).parameters.values()
     except (TypeError, ValueError):
-        return True
+        return False
     return any(
         p.default is inspect.Parameter.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
         for p in params

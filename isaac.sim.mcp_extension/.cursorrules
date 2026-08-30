@@ -26,7 +26,7 @@
 - Objects should include 'type' and 'position' at minimum
 - Object format example: {"path": "/World/Cube", "type": "Cube", "size": 20, "position": [0, 100, 0]}
 - Default gravity is [0, 0, -981.0] (cm/s^2)
-- Set floor=True to create a default ground plane
+- A default ground plane is always created; there is no floor parameter
 
 # Script Execution Rules
 - Use World class instead of SimulationContext when possible

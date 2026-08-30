@@ -67,8 +67,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         """Remove all prims from the scene.
 
         Also empties any environment loaded by load_environment, so a later
-        create_physics_scene(floor=True) does not stack a second ground under
-        the first. The stage's defaultLight is always kept — a stage with no
+        create_physics_scene does not stack a second ground under the first —
+        it always creates one. The stage's defaultLight is always kept — a stage with no
         light renders black, which looks like a broken camera.
 
         Args:

@@ -173,14 +173,44 @@ def test_v6_sensor_is_actually_torn_down():
     assert sensor.invalidated, "release_sensor did nothing for a 6.0 sensor"
 
 
-def test_methods_needing_arguments_are_never_called_bare():
-    """The invariant was a comment saying every name must take no arguments, and
-    a comment did not stop detach_annotators being added to the list. Enforce it
-    by inspecting the signature instead."""
-    adapter = _Adapter()
+def test_the_guard_itself_classifies_teardown_methods():
+    """Assert on the guard, not on a side effect it cannot produce.
+
+    Watching `bad_calls` stay empty proves nothing: an arg-taking method raises
+    TypeError before its body runs, so the list is empty whether or not the
+    guard exists — verified by deleting the guard and watching the test still
+    pass. The invariant has to be asserted directly, because it is the thing
+    that failed twice.
+    """
+    from isaac_sim_mcp_extension.adapters.base import _needs_arguments
+
     sensor = _V6SensorShaped()
-    adapter._camera_sensors["/World/C"] = sensor
 
-    adapter.release_sensor("/World/C")
+    assert _needs_arguments(sensor.detach_annotators), "detach_annotators(annotators) must be skipped"
+    assert _needs_arguments(sensor.detach_writer), "detach_writer(writer_name) must be skipped"
+    assert not _needs_arguments(sensor._invalidate_sensor), "_invalidate_sensor() must be callable"
 
-    assert sensor.bad_calls == [], f"called methods that require arguments: {sensor.bad_calls}"
+
+def test_guard_allows_optional_arguments():
+    """A default-valued parameter is still callable bare and must not be skipped."""
+    from isaac_sim_mcp_extension.adapters.base import _needs_arguments
+
+    class _Optional:
+        def destroy(self, force=False):
+            pass
+
+    assert not _needs_arguments(_Optional().destroy)
+
+
+def test_guard_calls_when_the_signature_cannot_be_read():
+    """Unreadable signature means call it, not skip it.
+
+    Some Isaac wrappers are C-implemented and inspect.signature raises on them.
+    Skipping such a method reintroduces exactly the silent no-op this guard
+    exists to prevent, whereas calling one that turns out to need arguments
+    costs a TypeError the call site already swallows. Bias toward calling.
+    """
+    from isaac_sim_mcp_extension.adapters.base import _needs_arguments
+
+    assert not _needs_arguments(print)  # builtin: signature may or may not resolve
+    assert not _needs_arguments(object())  # not callable at all -> must not be skipped on signature grounds

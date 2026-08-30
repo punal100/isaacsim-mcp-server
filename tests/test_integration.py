@@ -545,7 +545,12 @@ class TestSimulationTools:
         """
         send(conn, "simulation.stop")
         send(conn, "scene.clear")
-        send(conn, "scene.create_physics", {"floor": True})
+        # `floor` was never a parameter — the handler always creates the ground
+        # plane — so this call used to fail with an unexpected-keyword TypeError
+        # and go unchecked, leaving the class running without the physics scene
+        # it believed it had set up.
+        resp = send(conn, "scene.create_physics")
+        assert resp["status"] == "success", f"physics scene not created: {resp}"
 
     def test_play(self, conn: IsaacConnection) -> None:
         resp = send(conn, "simulation.play")

@@ -183,7 +183,7 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environmen
         # defaultLight, and a stage with no light renders black -- which reads
         # as a broken sensor rather than a missing lamp. Its *contents* are a
         # different matter: a loaded environment used to survive clear_scene
-        # entirely, so a later create_physics_scene(floor=True) stacked a second
+        # entirely, so a later create_physics_scene stacked a second
         # ground under the first and "clear" left a 100 m world in place.
         # Sensors first: an initialized camera or lidar keeps its prim alive, so
         # clearing without releasing them left every camera ever created on the
