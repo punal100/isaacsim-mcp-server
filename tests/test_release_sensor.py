@@ -209,8 +209,12 @@ def test_guard_calls_when_the_signature_cannot_be_read():
     Skipping such a method reintroduces exactly the silent no-op this guard
     exists to prevent, whereas calling one that turns out to need arguments
     costs a TypeError the call site already swallows. Bias toward calling.
+
+    These two cover both arms of the guard's `except (TypeError, ValueError)`:
+    inspect.signature(print) raises ValueError, inspect.signature(object())
+    raises TypeError.
     """
     from isaac_sim_mcp_extension.adapters.base import _needs_arguments
 
-    assert not _needs_arguments(print)  # builtin: signature may or may not resolve
-    assert not _needs_arguments(object())  # not callable at all -> must not be skipped on signature grounds
+    assert not _needs_arguments(print)  # ValueError arm
+    assert not _needs_arguments(object())  # TypeError arm
