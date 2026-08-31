@@ -24,7 +24,13 @@
 """Test the IsaacConnection module structure."""
 
 import ast
+import json
 import os
+import socket
+import threading
+import time
+
+from isaac_mcp.connection import IsaacConnection
 
 
 def test_connection_module_exists():
@@ -47,3 +53,225 @@ def test_connection_has_required_classes_and_functions():
             assert "connect" in methods
             assert "disconnect" in methods
             assert "send_command" in methods
+
+
+class _FakeIsaac(threading.Thread):
+    """Stand-in for the Kit extension socket server.
+
+    Accepts one connection and closes it without replying — the state a cached
+    socket is left in when Isaac Sim exits — then serves every later connection
+    normally, like a freshly relaunched Kit listening on the same port.
+
+    Later connections are kept open across commands, matching the extension's
+    own SocketServer._handle_client, which loops on recv() rather than closing
+    after each reply. A fake that closed per command would make every call race
+    an incoming FIN, which the real server never does.
+    """
+
+    daemon = True
+
+    def __init__(self):
+        super().__init__()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.port = self._listener.getsockname()[1]
+        self.first_connection_closed = threading.Event()
+        self.commands_served = []
+        self._stop = threading.Event()
+
+    def run(self):
+        served_first = False
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            if not served_first:
+                # Isaac Sim goes away: drop the connection without a reply.
+                served_first = True
+                conn.close()
+                self.first_connection_closed.set()
+                continue
+            with conn:
+                conn.settimeout(5)
+                while not self._stop.is_set():
+                    try:
+                        raw = conn.recv(65536)
+                    except OSError:
+                        break
+                    if not raw:  # client hung up
+                        break
+                    self.commands_served.append(json.loads(raw.decode())["type"])
+                    conn.sendall(json.dumps({"status": "success", "result": {"ok": True}}).encode())
+
+    def shutdown(self):
+        self._stop.set()
+        self._listener.close()
+
+
+def test_send_command_redials_when_isaac_restarted():
+    """A cached socket whose peer has gone must be redialled, not surfaced as an error.
+
+    Reproduces the live symptom: after Isaac Sim restarts, the long-lived MCP
+    server still holds the socket from the previous Kit, and the first tool call
+    fails with "Connection closed before receiving any data" while the retry
+    succeeds.
+    """
+    server = _FakeIsaac()
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        assert conn.connect() is True
+        assert server.first_connection_closed.wait(timeout=5)
+        # Give the FIN time to land on our side of the cached socket.
+        time.sleep(0.2)
+
+        result = conn.send_command("get_simulation_state")
+        assert result == {"ok": True}
+        assert server.commands_served == ["get_simulation_state"]
+    finally:
+        server.shutdown()
+
+
+def test_send_command_does_not_resend_a_command_that_was_already_delivered():
+    """Recovery must never replay a command — retrying could double-execute it.
+
+    The stale socket is detected before anything is written, so a command is
+    delivered exactly once even across the reconnect.
+    """
+    server = _FakeIsaac()
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        conn.connect()
+        assert server.first_connection_closed.wait(timeout=5)
+        time.sleep(0.2)
+
+        conn.send_command("create_robot")
+        conn.send_command("create_robot")
+        assert server.commands_served == ["create_robot", "create_robot"]
+    finally:
+        server.shutdown()
+
+
+def test_stale_check_is_instant_on_a_healthy_socket_with_a_timeout_set():
+    """The liveness probe must never wait on a healthy connection.
+
+    send_command leaves a 300s timeout on the socket. A probe that respects that
+    timeout blocks for five minutes on the next call instead of returning at
+    once — observed live: a Kit swap made the following command hang rather than
+    reconnect.
+    """
+    server = _FakeIsaac()
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        conn.connect()
+        assert server.first_connection_closed.wait(timeout=5)
+        time.sleep(0.2)
+        conn.send_command("scene.get_info")  # leaves settimeout(300)
+        assert conn.sock.gettimeout() == 300.0
+
+        started = time.monotonic()
+        assert conn._peer_is_gone() is False  # healthy: nothing to read
+        assert time.monotonic() - started < 1.0, "liveness probe blocked on a healthy socket"
+        # The probe must not disturb the timeout the caller relies on.
+        assert conn.sock.gettimeout() == 300.0
+    finally:
+        server.shutdown()
+
+
+class _ErroringIsaac(threading.Thread):
+    """Stand-in for a Kit extension that rejects a command.
+
+    Replies with the extension's own error envelope — the shape
+    `_execute_command` produces when a handler validates its input and refuses.
+    Nothing is wrong with the connection itself, which is the whole point.
+    """
+
+    daemon = True
+
+    def __init__(self, message: str):
+        super().__init__()
+        self._message = message
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.port = self._listener.getsockname()[1]
+        self.connections_accepted = 0
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            self.connections_accepted += 1
+            with conn:
+                conn.settimeout(5)
+                while not self._stop.is_set():
+                    try:
+                        raw = conn.recv(65536)
+                    except OSError:
+                        break
+                    if not raw:
+                        break
+                    conn.sendall(json.dumps({"status": "error", "message": self._message}).encode())
+
+    def shutdown(self):
+        self._stop.set()
+        self._listener.close()
+
+
+def test_server_side_error_is_surfaced_verbatim():
+    """A handler's validation message must reach the caller unchanged.
+
+    Prefixing it with "Communication error with Isaac" tells an agent the
+    transport failed, so it reconnects and retries instead of correcting the
+    input that was actually wrong.
+    """
+    message = "size must be greater than 0 (got 0.0); a zero or negative size scales the prim to nothing"
+    server = _ErroringIsaac(message)
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        try:
+            conn.send_command("objects.create", {"size": 0})
+        except Exception as exc:
+            assert str(exc) == message, f"message was rewritten: {exc!r}"
+        else:
+            raise AssertionError("expected the server-side error to raise")
+    finally:
+        server.shutdown()
+
+
+def test_server_side_error_keeps_the_socket_open():
+    """A rejected command must not cost the connection.
+
+    The socket is healthy — the server answered. Clearing it forces a redial on
+    every subsequent call, and the project deliberately redials rather than
+    retries, so the next command pays for a failure that never happened.
+    """
+    server = _ErroringIsaac("Prim not found: /World/Nope")
+    server.start()
+    try:
+        conn = IsaacConnection(host="127.0.0.1", port=server.port)
+        try:
+            conn.send_command("objects.transform", {"prim_path": "/World/Nope"})
+        except Exception:
+            pass
+        assert conn.sock is not None, "a validation error discarded a healthy socket"
+
+        try:
+            conn.send_command("objects.transform", {"prim_path": "/World/Nope"})
+        except Exception:
+            pass
+        assert server.connections_accepted == 1, (
+            f"reconnected {server.connections_accepted} times for validation errors"
+        )
+    finally:
+        server.shutdown()

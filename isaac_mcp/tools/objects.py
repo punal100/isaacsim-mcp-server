@@ -40,24 +40,38 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        size: Optional[float] = None,
         color: Optional[List[float]] = None,
         physics_enabled: bool = False,
         prim_path: Optional[str] = None,
     ) -> str:
         """Create a primitive object (Cube, Sphere, Cylinder, Cone, Capsule, Plane).
 
-        The scale parameter multiplies the primitive's default size. For example,
-        a Cube has default size 2.0, so scale=[0.5, 0.5, 0.5] creates a 1.0m cube.
+        Prefer `size` for absolute sizing: `size` is the target in METERS
+        (default 1.0), so `size=0.3` gives a 0.3 m object regardless of type.
 
-        Returns prim_path, actual_size [x, y, z] in meters, and bounding_box
-        (min/max corners in world coordinates) so you can accurately place other
-        objects relative to this one (e.g. placing a cube on top of a table).
+        `scale` is a RAW MULTIPLIER of the primitive's NATIVE size, not meters.
+        Native sizes: Cube/Sphere/Cylinder/Cone/Capsule = 2 m, Plane = 1 m.
+        So `scale=0.5` on a Cube -> 1 m, and `scale=[0.4,0.4,0.3]` -> a
+        0.8 x 0.8 x 0.6 m box (0.4 * 2 m), which surprises callers who expect
+        0.4 m. Use `scale` only for deliberate non-uniform shaping; otherwise
+        use `size`. If both are given, `scale` wins and `size` is ignored.
+
+        For the geometric prims (Cube, Sphere, Cylinder, Cone, Capsule) this
+        returns prim_path, actual_size [x, y, z] in meters, and bounding_box
+        (min/max corners in world coordinates) so you can accurately place
+        other objects relative to this one. A Plane has no such extent and
+        returns prim_path only.
 
         Args:
-            object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane.
+            object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane
+                (case-insensitive; "cube" is normalized to "Cube").
             position: [x, y, z] world position.
             rotation: [rx, ry, rz] rotation in degrees.
-            scale: [sx, sy, sz] scale factors.
+            scale: [sx, sy, sz] RAW multiplier of the native size (2 m for most
+                prims, 1 m for Plane). NOT meters. Overrides `size`.
+            size: Target size in METERS (default 1.0). Absolute; independent of
+                the primitive's native size. Ignored if `scale` is provided.
             color: [r, g, b] color values (0-1).
             physics_enabled: Enable physics on this object.
             prim_path: Custom prim path. Auto-generated if not provided.
@@ -71,6 +85,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
                 params["rotation"] = rotation
             if scale:
                 params["scale"] = scale
+            if size is not None:
+                params["size"] = size
             if color:
                 params["color"] = color
             if prim_path:

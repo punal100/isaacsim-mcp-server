@@ -70,12 +70,19 @@ Scripts/Action Graphs operate WITHIN frames (runtime-level): control loops, IK, 
 - create_robot: call list_available_robots first for exact keys (lowercase, no spaces, e.g. "frankafr3")
 - Always get_prim_info to query actual positions/sizes BEFORE writing controller scripts
 
-### Debug Loop
-step_simulation with observe_prims/observe_joints. If issues: get_joint_config, get_physics_state, get_isaac_logs.
-Do NOT use play_simulation + sleep + execute_script as a debug loop.
+### Debug Loop (step-only — never play)
+The debug loop is step-only: set_joint_positions + step_simulation with
+observe_prims/observe_joints on a FROZEN timeline. Do NOT call play_simulation
+while debugging — step errors if the timeline is already playing. If issues:
+get_joint_config, get_physics_state, get_isaac_logs.
+play_simulation is ONLY for a final continuous run / ScriptNode demo.
+Two separate debug modes: MCP loop = step on a frozen timeline (no graph);
+ScriptNode/Action-Graph = play + get_isaac_logs (graphs tick only while playing
+and cannot be stepped). Do not mix them.
 
 ### Controller Development
-Write .py file → reload_script → step_simulation to debug → edit & reload → play_simulation when ready.
+Write .py file → reload_script → step_simulation to debug → edit & reload →
+play_simulation only for the final continuous run.
 
 ### ScriptNode (Action Graph)
 create_action_graph(script_file="/path/to/controller.py") wires OnPlaybackTick → ScriptNode.
@@ -92,6 +99,27 @@ See demo/franka_pick_place.py for a complete working example.
 ### Tool Priority
 Prefer named tools over execute_script: get_joint_positions, get_prim_info, get_physics_state,
 get_joint_config, get_isaac_logs, create_action_graph, edit_action_graph.
+
+### Contracts (silent-failure map)
+- step_simulation is authoritative and freezes the timeline; it errors if the
+  timeline is already playing. Never play during the debug loop (see Debug Loop).
+- stop_simulation resets the scene to spawn state (state at first Play).
+- get_isaac_logs shows carb.log_*/omni.log WARN+ERROR plus captured stdout
+  tagged [PRINT]; plain print() outside execute_script/reload_script may not
+  appear. Defaults are non-destructive and scoped to the current run.
+- execute_script can silently disturb a live Action Graph / ScriptNode that
+  controls the same articulation — stop the graph first.
+- ScriptNode physics contract: physics must be initialised before articulation
+  writes take effect; such write failures are SILENT (not raised). Follow the
+  WARMUP pattern (skip ~30 frames, then World.initialize_physics() +
+  robot.initialize()).
+
+### Physics engine (Isaac Sim 6.0)
+get_simulation_state reports `engine` on 6.0; absent on 5.1, which is PhysX.
+On "newton" (beta): joint drives do not converge and joint limits are not
+enforced — run motion work on PhysX (isaac-sim.sh). Never author a joint via
+execute_script unless an ancestor has UsdPhysics.ArticulationRootAPI: it aborts
+physics for the whole session and only restarting Isaac Sim recovers it.
 """
 
 mcp = FastMCP(

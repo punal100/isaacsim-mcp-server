@@ -64,7 +64,18 @@ LICENSE_DOCSTRING_HEADER_RE = re.compile(
 )
 
 # Directories to skip
-SKIP_DIRS = [".git", ".vscode", "__pycache__", "venv", "env", ".env", "build", "dist"]
+SKIP_DIRS = [
+    ".git",
+    ".vscode",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "site-packages",
+    "env",
+    ".env",
+    "build",
+    "dist",
+]
 
 
 # Check if the file already has a license header

@@ -37,6 +37,17 @@ logger = logging.getLogger("IsaacMCPServer")
 DEFAULT_PORT = 8766
 
 
+class IsaacCommandError(Exception):
+    """The extension received the command and refused it.
+
+    Distinct from a transport failure: the socket is healthy and the message is
+    the handler's own. Keeping the two apart matters twice over — the message
+    must reach the caller unrewritten so an agent fixes its input instead of
+    reconnecting, and the socket must survive, because a rejected command costs
+    nothing and a redial is not free.
+    """
+
+
 @dataclass
 class IsaacConnection:
     """Manages a persistent TCP socket connection to the Isaac Sim extension."""
@@ -50,9 +61,48 @@ class IsaacConnection:
 
     sock: Optional[socket.socket] = field(default=None, repr=False)
 
+    def _peer_is_gone(self) -> bool:
+        """True when the cached socket's peer has already closed it.
+
+        This connection outlives the Isaac Sim process it was dialled to: the
+        MCP server keeps running across Kit restarts, so `self.sock` routinely
+        refers to a Kit that has exited. Peeking without consuming distinguishes
+        "nothing to read yet" (BlockingIOError — healthy idle socket) from "FIN
+        received" (b"" — peer gone).
+
+        Checked *before* sending rather than retrying after a failure, because a
+        retry cannot tell whether Isaac already executed the command; replaying
+        a create_robot or a delete would be worse than the error it fixes.
+        """
+        if self.sock is None:
+            return True
+        previous_timeout = self.sock.gettimeout()
+        try:
+            # settimeout(0) — not MSG_DONTWAIT alone. send_command leaves a 300s
+            # timeout on the socket, and CPython waits for readability using that
+            # timeout before issuing the syscall, so the flag alone would block
+            # for five minutes on a healthy idle connection instead of answering
+            # immediately. Non-blocking mode makes the probe unconditionally cheap.
+            self.sock.settimeout(0)
+            return self.sock.recv(1, socket.MSG_PEEK) == b""
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        finally:
+            try:
+                self.sock.settimeout(previous_timeout)
+            except OSError:
+                pass
+
     def connect(self) -> bool:
         if self.sock:
-            return True
+            if not self._peer_is_gone():
+                return True
+            # Isaac Sim restarted under us — drop the dead socket and redial so
+            # the caller does not eat a spurious "connection closed" error.
+            logger.info("Cached Isaac connection is stale; reconnecting")
+            self.disconnect()
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((self.host, self.port))
@@ -107,7 +157,8 @@ class IsaacConnection:
         raise Exception("No data received")
 
     def send_command(self, command_type: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        if not self.sock and not self.connect():
+        # connect() also validates a cached socket, so always route through it.
+        if not self.connect():
             raise ConnectionError("Not connected to Isaac")
 
         command = {"type": command_type, "params": params or {}}
@@ -118,8 +169,12 @@ class IsaacConnection:
             response = json.loads(response_data.decode("utf-8"))
 
             if response.get("status") == "error":
-                raise Exception(response.get("message", "Unknown error from Isaac"))
+                raise IsaacCommandError(response.get("message", "Unknown error from Isaac"))
             return response.get("result", {})
+        except IsaacCommandError:
+            # The command round-tripped; only the command failed. Leave the
+            # socket alone and let the handler's message through untouched.
+            raise
         except socket.timeout:
             self.sock = None
             raise Exception("Timeout waiting for Isaac response")

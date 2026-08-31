@@ -63,22 +63,113 @@ def create_physics(
     adapter: IsaacAdapterBase, gravity: Optional[Sequence[float]] = None, scene_name: str = "PhysicsScene"
 ) -> Dict[str, Any]:
     try:
-        scene_path = adapter.create_physics_scene(gravity=gravity, scene_name=scene_name)
-        # Create ground plane with collision so objects don't fall through
-        floor_path = "/World/groundPlane"
-        adapter.create_prim(floor_path, "Plane")
         from pxr import UsdPhysics
 
+        scene_path = adapter.create_physics_scene(gravity=gravity, scene_name=scene_name)
+        # Ground plane with collision so objects don't fall through. Only create
+        # it when missing: create_prim raises "A prim already exists at prim
+        # path" on a second call, and because the scene is established first the
+        # tool would report failure for work it had just completed — while
+        # naming groundPlane, which looks unrelated to the caller's request.
+        # Re-establishing a scene on a dirty stage is a normal thing to do, so
+        # this stays idempotent.
         stage = adapter.get_stage()
+        floor_path = "/World/groundPlane"
+        if not stage.GetPrimAtPath(floor_path).IsValid():
+            adapter.create_prim(floor_path, "Plane")
         gp = stage.GetPrimAtPath(floor_path)
         if gp.IsValid() and not gp.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI.Apply(gp)
+
+        # Bring physics up NOW, while the stage still holds no articulation.
+        #
+        # PhysX corrupts its GPU pipeline if the simulation is first set up
+        # with an articulation already on the stage and another is added
+        # afterwards: the next start dies with "PhysX Internal CUDA error.
+        # Simulation cannot continue! Error code 700", followed by one
+        # "PhysX ABORT ... because of previous CUDA errors" per stepped frame.
+        # The simulator keeps answering and step_simulation still reports
+        # success, but physics is dead — a dropped sphere stays at its spawn
+        # height and joint reads come back as garbage (-431602080.0 measured
+        # on 6.0.1).
+        #
+        # Nothing else set up physics before the first robot, because
+        # _ensure_physics_world is reached from create_robot's joint report —
+        # i.e. one reference too late. Measured on 6.0.1-rc.7, cold-booted per
+        # trial, two FR3s through the tools: initialise before either robot and
+        # 150 steps run clean; initialise after the first and the second robot
+        # brings 149 aborts. Stock Isaac Sim with the same two robots is clean
+        # either way, and one robot alone never trips it, which is why every
+        # single-robot flow missed this.
+        #
+        # PhysX only. Newton has no such fault (0 CUDA errors in every trial),
+        # and priming it here actively breaks it: Newton builds its model when
+        # physics comes up, so a model built on the empty scene left a
+        # rigid-body-only stage frozen — a sphere dropped from z=2 stayed at
+        # 2.000 where it had landed at 0.149, even though step reported the
+        # rebuild. Scenes containing a robot were unaffected, which is exactly
+        # the kind of partial break that ships unnoticed.
+        # NOTE: an engine that cannot be identified ("unknown") primes, as
+        # it always has -- V6 answers "unknown" whenever detection fails.
+        if adapter.engine != adapter.ENGINE_NEWTON:
+            adapter._ensure_physics_world()
         return {"status": "success", "message": f"Physics scene created at {scene_path}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
-def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, Any]:
+def _clear_environment_contents(adapter: IsaacAdapterBase, stage) -> list:
+    """Empty /Environment of loaded content while keeping the default lighting.
+
+    Removes the reference arcs as well as the composed children: deleting only
+    the children leaves the arc behind, and the next load_environment then
+    composes a second reference on top of it.
+    """
+    env = stage.GetPrimAtPath("/Environment")
+    if not env or not env.IsValid():
+        return []
+    # Snapshot paths, not prim handles. Deleting one child expires the handles
+    # held for the others, and touching an expired one raises
+    # "Accessed invalid expired 'Xform' prim" -- which aborted the whole clear,
+    # so clear_scene failed outright on a stage that had an environment loaded.
+    child_paths = []
+    for child in env.GetChildren():
+        try:
+            if child.GetName() != "defaultLight":
+                child_paths.append(str(child.GetPath()))
+        except Exception:
+            continue
+    removed = []
+    for path in child_paths:
+        name = path.rsplit("/", 1)[-1]
+        try:
+            child = stage.GetPrimAtPath(path)
+            if not child or not child.IsValid():
+                continue
+            try:
+                child.GetReferences().ClearReferences()
+            except Exception:
+                pass
+            adapter.delete_prim(path)
+            removed.append(name)
+        except Exception:
+            # One stubborn child must not abort the rest of the clear.
+            continue
+    # Older callers referenced straight onto /Environment; undo that too, along
+    # with any axis/unit reconciliation transform authored for it.
+    try:
+        from pxr import UsdGeom
+
+        env = stage.GetPrimAtPath("/Environment")
+        if env and env.IsValid():
+            env.GetReferences().ClearReferences()
+            UsdGeom.Xformable(env).ClearXformOpOrder()
+    except Exception:
+        pass
+    return removed
+
+
+def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environment: bool = False) -> Dict[str, Any]:
     try:
         stage = adapter.get_stage()
         # Prims to never delete (system prims)
@@ -90,6 +181,29 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, An
             "/Render",
             "/Environment",
         }
+        # /Environment stays in keep_paths because it holds the stage's
+        # defaultLight, and a stage with no light renders black -- which reads
+        # as a broken sensor rather than a missing lamp. Its *contents* are a
+        # different matter: a loaded environment used to survive clear_scene
+        # entirely, so a later create_physics_scene stacked a second
+        # ground under the first and "clear" left a 100 m world in place.
+        # Sensors first: an initialized camera or lidar keeps its prim alive, so
+        # clearing without releasing them left every camera ever created on the
+        # stage, still rendering.
+        # Delete each sensor prim by its own path rather than relying on the
+        # root sweep below: deleting the *parent* does not release a camera the
+        # way deleting the camera path does, so a bulk clear left cameras behind
+        # for three passes while their render products kept rendering.
+        # delete_prim releases the wrapper first, which is the sequence proven
+        # to make the deletion stick.
+        try:
+            for cache_name in ("_camera_sensors", "_lidar_sensors"):
+                for sensor_path in list(getattr(adapter, cache_name, {}) or {}):
+                    adapter.delete_prim(sensor_path)
+            adapter.release_all_sensors()
+        except Exception:
+            pass
+        removed_environment = _clear_environment_contents(adapter, stage) if not keep_environment else []
         # Clear all root-level prims (robots created at root, etc.)
         root_prim = stage.GetPseudoRoot()
         for child in root_prim.GetChildren():
@@ -99,15 +213,45 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False) -> Dict[str, An
             if keep_physics and "Physics" in path:
                 continue
             adapter.delete_prim(path)
-        return {"status": "success", "message": "Scene cleared"}
+        # The cached World still points at the prims just deleted. Left in place
+        # it survives until something calls initialize_physics() on it, which
+        # then raises "Accessed schema on invalid prim" and wedges every tool
+        # that ensures a physics world. Drop it so the next call rebuilds
+        # against the live stage.
+        try:
+            from isaacsim.core.api import World
+
+            if World.instance() is not None:
+                World.clear_instance()
+        except Exception:
+            pass  # Non-v5 runtimes / no World in play — nothing to invalidate.
+        message = "Scene cleared"
+        if removed_environment:
+            message += f". Removed environment content: {', '.join(removed_environment)}"
+            message += " (pass keep_environment=true to preserve it)"
+        elif keep_environment:
+            message += ". Environment preserved"
+        result = {"status": "success", "message": message}
+        if removed_environment:
+            result["removed_environment"] = removed_environment
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
-def list_prims(adapter: IsaacAdapterBase, root_path: str = "/", prim_type: Optional[str] = None) -> Dict[str, Any]:
+def list_prims(
+    adapter: IsaacAdapterBase,
+    root_path: str = "/",
+    prim_type: Optional[str] = None,
+    recursive: bool = False,
+) -> Dict[str, Any]:
     try:
-        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type)
-        return {"status": "success", "prims": prims}
+        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type, recursive=recursive)
+        # Say which of the two listings this was. The shallow default reads as a
+        # complete answer otherwise: during the 0.6.0 sweep "/World present"
+        # after a clear_scene was taken for an empty scene while a lidar was
+        # still parented under it.
+        return {"status": "success", "prims": prims, "recursive": recursive}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -141,8 +285,106 @@ def list_environments(adapter: IsaacAdapterBase) -> Dict[str, Any]:
     return {"status": "success", "environment_count": len(library), "environments": library}
 
 
+# ── Environment reference reconciliation ───────────────────────────────────
+#
+# A referenced layer declares its own upAxis and metersPerUnit, and USD does not
+# reconcile either when the reference is composed. Measured across the shipped
+# library: 6 of 25 environments on 5.1 and 8 of 28 on 6.0 are Y-up, and 8 of 25 /
+# 10 of 28 are authored in centimetres. Loading one of those into the Z-up,
+# 1 m/unit stage this extension creates left it rotated 90 degrees AND 100x too
+# large -- a "ground" standing on edge, 10 km across, with its floor at z=-5000.
+# Neither adapter's add_reference_to_stage corrects it; this does.
+
+
+def _asset_axis_and_units(url: str):
+    """upAxis and metersPerUnit a referenced layer declares, or (None, None)."""
+    try:
+        from pxr import Sdf
+
+        layer = Sdf.Layer.FindOrOpen(url)
+        if layer is None:
+            return None, None
+        root = layer.pseudoRoot
+        # USD's defaults when unauthored, not a guess: Y-up, centimetres.
+        up = str(root.GetInfo("upAxis")) if root.HasInfo("upAxis") else "Y"
+        mpu = float(root.GetInfo("metersPerUnit")) if root.HasInfo("metersPerUnit") else 0.01
+        return up, mpu
+    except Exception:
+        return None, None
+
+
+def _reference_conversion(adapter: IsaacAdapterBase, prim_path: str, url: str) -> Dict[str, Any]:
+    """Report the axis/unit conversion USD applied to a freshly referenced prim.
+
+    USD authors xformOp:rotateX:unitsResolve / xformOp:scale:unitsResolve itself
+    when it composes a reference whose layer declares a different upAxis or
+    metersPerUnit -- but only when it *creates* the prim. Referencing onto a prim
+    that already exists (the old default /Environment, which the stage ships
+    holding defaultLight) skips that resolution entirely, and the environment
+    arrived rotated 90 degrees and 100x oversized: a ground standing on edge,
+    10 km across, floor at z=-5000.
+
+    So the fix is to reference onto a fresh child, not to correct by hand.
+    Correcting on top of USD's own ops squares the scale -- measured 0.0001
+    instead of 0.01, an environment 1 m across. This only reports what happened,
+    so the conversion is visible rather than magic.
+    """
+    from pxr import UsdGeom
+
+    asset_up, asset_mpu = _asset_axis_and_units(url)
+    if asset_up is None:
+        return {}
+    stage = adapter.get_stage()
+    if stage is None:
+        return {}
+    prim = stage.GetPrimAtPath(prim_path)
+    resolved = []
+    if prim and prim.IsValid():
+        resolved = [
+            op.GetName().split(":", 1)[-1]
+            for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+            if "unitsResolve" in op.GetName()
+        ]
+    stage_up = str(UsdGeom.GetStageUpAxis(stage))
+    stage_mpu = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
+    if asset_up == stage_up and abs((asset_mpu / stage_mpu if stage_mpu else 1.0) - 1.0) <= 1e-6:
+        return {}
+    applied: Dict[str, Any] = {"asset": {"up_axis": asset_up, "meters_per_unit": asset_mpu}}
+    if asset_up != stage_up:
+        applied["up_axis"] = f"{asset_up}->{stage_up}"
+    if abs((asset_mpu / stage_mpu if stage_mpu else 1.0) - 1.0) > 1e-6:
+        applied["scale"] = asset_mpu / stage_mpu
+    applied["applied_by"] = "usd" if resolved else "none"
+    if resolved:
+        applied["ops"] = resolved
+    return applied
+
+
+def _world_bounds(adapter: IsaacAdapterBase, prim_path: str) -> Dict[str, Any]:
+    """Extent and floor height of a loaded environment, so the caller can place
+    objects on it without a second round trip."""
+    try:
+        from pxr import Usd, UsdGeom
+
+        stage = adapter.get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return {}
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+        rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        if rng.IsEmpty():
+            return {}
+        mn, mx = rng.GetMin(), rng.GetMax()
+        return {
+            "extent": [round(mx[i] - mn[i], 3) for i in range(3)],
+            "floor_height": round(mn[2], 3),
+        }
+    except Exception:
+        return {}
+
+
 def load_environment(
-    adapter: IsaacAdapterBase, environment: Optional[str] = None, prim_path: str = "/Environment"
+    adapter: IsaacAdapterBase, environment: Optional[str] = None, prim_path: Optional[str] = None
 ) -> Dict[str, Any]:
     try:
         if not environment:
@@ -156,12 +398,13 @@ def load_environment(
 
         # Exact match
         match = library.get(q)
+        matched_key = q if match else None
 
         # Fuzzy match
         if not match:
             for key, info in library.items():
                 if q in key or q in info.get("description", "").lower():
-                    match = info
+                    match, matched_key = info, key
                     break
 
         if not match:
@@ -170,7 +413,51 @@ def load_environment(
 
         assets_root = adapter.get_assets_root_path()
         full_path = assets_root + match["asset_path"]
-        adapter.load_environment(full_path, prim_path)
-        return {"status": "success", "message": f"Loaded environment: {match['description']}", "prim_path": prim_path}
+
+        # Load under a named child rather than onto /Environment itself. That
+        # prim also holds the stage's defaultLight, so sharing it meant the
+        # reconciliation transform below rotated the light too, and clear_scene
+        # could not remove the environment without removing the lighting.
+        target = prim_path or f"/Environment/{matched_key or 'environment'}"
+
+        # Re-loading must replace, not stack. Composing a second reference onto
+        # a prim that already carries one silently changes the geometry -- the
+        # same asset measured 10000x0x10000 on the first load and 100x100x0 on
+        # the second -- and deleting the composed children does not remove the
+        # arc that causes it.
+        # get_stage() can be None before the stage is ready — the original code
+        # never touched it, so a hard dependency here turned a working load into
+        # "'NoneType' object has no attribute 'GetPrimAtPath'". Degrade instead.
+        stage = adapter.get_stage()
+        if stage is not None:
+            existing = stage.GetPrimAtPath(target)
+            if existing and existing.IsValid():
+                try:
+                    existing.GetReferences().ClearReferences()
+                except Exception:
+                    pass
+
+        adapter.load_environment(full_path, target)
+        corrections = _reference_conversion(adapter, target, full_path)
+        bounds = _world_bounds(adapter, target)
+
+        message = f"Loaded environment: {match['description']}"
+        if corrections:
+            message += f" (axis/units {corrections.get('applied_by')}-converted)"
+        result = {"status": "success", "message": message, "prim_path": target}
+        if corrections:
+            result["corrections"] = corrections
+        if bounds:
+            result["bounds"] = bounds
+        else:
+            # bounds carry floor_height, which is what lets a caller place
+            # objects on the ground. Omitting them silently left the caller to
+            # guess z on a stage whose scale it has not seen.
+            result["warning"] = (
+                "Could not compute bounds for this environment, so extent and floor_height are "
+                "missing from this response. Query a specific prim with get_prim_info before "
+                "placing objects, rather than assuming the ground is at z=0."
+            )
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
