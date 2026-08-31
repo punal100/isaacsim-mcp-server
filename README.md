@@ -7,6 +7,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP Quality](https://archestra.ai/mcp-catalog/api/badge/quality/whats2000/isaacsim-mcp-server)](https://archestra.ai/mcp-catalog/api/badge/quality/whats2000/isaacsim-mcp-server)
+[![isaacsim-mcp-server MCP server](https://glama.ai/mcp/servers/whats2000/isaacsim-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/whats2000/isaacsim-mcp-server)
 
 > Natural language control for NVIDIA Isaac Sim through the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP).
 
