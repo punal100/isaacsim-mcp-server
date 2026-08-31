@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp[cli]",
+    "mcp[cli]>=1.9.0,<2",
 ]
 
 [dependency-groups]
