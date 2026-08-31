@@ -71,7 +71,7 @@ The automated script skips the following directories:
 - `.git`
 - `.vscode`
 - `__pycache__`
-- `venv`, `env`, `.env`
+- `venv`, `.venv`, `site-packages`, `env`, `.env`
 - `build`
 - `dist`
 
