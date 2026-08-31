@@ -27,6 +27,16 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    # Both bounds are load-bearing, and they fail in opposite directions.
+    #   >= 2     renamed FastMCP to MCPServer, so an unbounded spec made every
+    #            `pip install` of this package fail at import. Loud.
+    #   < 1.3.0  FastMCP.__init__(self, name=None, **settings) swallows
+    #            `instructions=`, so the server starts, serves all 42 tools and
+    #            silently loses the whole agent contract. Measured against the
+    #            built wheel: 1.2.0 drops it, 1.3.0 keeps it (3546 chars).
+    # 1.9.0 sits deliberately above the 1.3.0 floor: it is the oldest version
+    # exercised end to end here, and for a published package being stricter
+    # than necessary is the safe direction.
     "mcp[cli]>=1.9.0,<2",
 ]
 
