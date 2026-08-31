@@ -5,14 +5,14 @@ All notable changes to the isaacsim-mcp-server project will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-08-28
+## [0.6.0] - 2026-08-31
 
 ### Added
 - **Isaac Sim 6.0.0 support** — new `IsaacAdapterV6` built on `isaacsim.core.experimental.*` + `SimulationManager` + `isaacsim.sensors.experimental.rtx` + `isaacsim.asset.importer.urdf.URDFImporter`. Works under both the PhysX launcher (`isaac-sim.sh`) and the Newton launcher (`isaac-sim.newton.sh`).
 - **Newton engine parity** — stepping is engine-aware and frame-exact (`NewtonStage.step_sim`, reported as `stepping: "exact"`); positions come from Fabric, where Newton keeps its simulated transforms; the model is rebuilt when it diverges from the stage; and physics initialisation is refused on geometry the MuJoCo solver cannot build (cones, zero-sized shapes) rather than latching physics dead until Kit restarts.
 - **Engine auto-detection** — `adapters/__init__.py:get_adapter()` reads `isaacsim.core.version.get_version()` and selects V5 or V6 by major version. V6 reads `SimulationManager.get_active_physics_engine()` live, never cached.
 - **`engine` and `isaacsim_version` fields on `get_simulation_state`** — MCP clients can see the active backend without poking at the runtime.
-- **`position_source` on `get_joint_positions`** — reports whether a read measured physics or echoed the last command, and warns when it is an echo.
+- **`position_source` on every joint read** — `get_joint_positions`, `step_simulation(observe_joints=...)` and `get_joint_config` all report whether a read measured physics or echoed the last command, and warn when it is an echo. `get_joint_config` drops `position_error` from an echoed read rather than reporting the 0.0 it derives from comparing a target with itself.
 - **`create_camera(target=...)`** — aim a camera at a point instead of by euler angles; the response echoes `aimed_at` and the `rotation` applied.
 - **`create_action_graph(inline_script=...)`** — one-step OnPlaybackTick → ScriptNode wiring.
 - **`get_lidar_point_cloud` returns the cloud** — summary by default, `max_points` for a strided sample, `output_path` to write the sweep as `.npy`.
@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `create_material` accepts `material_path`, `reload_script` accepts `script_file` — FastMCP silently drops unknown keyword arguments.
 - `get_isaac_logs` is run-scoped, non-destructive, and captures `print()` as `[PRINT]`.
 - `scripts/smoke_test_v6.py` is now `scripts/smoke_test.py` and runs against either runtime.
+- Hot-reload (`scripts/dev_mcp_server.sh`) reloads `adapters.units` and `adapters.transforms` as well as `base`/`v5`/`v6`. `v5` and `v6` bind those names at module scope, so edits to the unit conversion or the `look_at` maths were invisible to a reload and a live measurement ran against stale code.
+- Live tests require `ISAAC_MCP_LIVE_TESTS=1`. They were armed by a socket probe at import, so `uv run pytest` mutated whatever Isaac Sim happened to be running.
 
 ### Fixed
 - **Two robots corrupted PhysX's GPU pipeline** — CUDA error 700, garbage joint values, and dead physics still reported as success. Physics is now initialised before any articulation exists.
@@ -42,20 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A requested rotation compounded with the prim's existing orientation**, so cameras could not be aimed at all.
 - **Environments lost their axis and unit conversion** — a ground standing on edge, 10 km across; 6 of 25 shipped environments on 5.1.
 - **`clear_scene` did not clear a loaded environment**, so the next `create_physics_scene` stacked a second ground.
-- **Both lidar tools were dead on 5.1**, and the empty-read message gave the wrong advice two times out of three.
+- **Both lidar tools were dead on 5.1**, and the empty-read message gave the wrong advice two times out of three. Reviving them surfaced a second trap that is now refused up front: a lidar re-created on a path that previously held one binds to the `Camera` prim the old sensor left behind and never returns a point.
 - **Cameras could not be deleted** — the sensor wrapper re-created the prim a tick later.
 - **Commands sent during startup failed with a raw `AttributeError`** — the socket opens seconds before Kit has a stage.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree.
+- **`create_object(color=...)` was accepted and discarded** — the parameter was documented and sent, no prim was ever coloured, and the call reported success.
+- **`search_usd` dropped `position` and `scale`** — the asset landed at the origin at native scale, reported as success.
+- **`set_joint_positions` reported the same success whether or not the robot took the command** — when the articulation refuses it, the values are written to USD drive targets, which move nothing until physics initialises again. The response now carries `command_source` and warns on the fallback.
 - **Every validation error was reported as a connection failure** — a typo'd prim path or a bad size came back as "Communication error with Isaac", which reads as a transport fault, and the healthy socket was thrown away and redialled on the next call.
 - **`reload_script(module_name=...)` re-ran stale bytecode** — editing a controller and reloading it reported success while the previous version kept running, whenever the edit left the file the same length.
 - **`list_prims` returned only immediate children** while documenting "all prims in the scene", so a camera parented under a robot was invisible to a listing that reported success.
 - **`edit_action_graph` rejected the relative attribute paths its own docstring documents** — every attribute except `usePath`/`scriptPath` failed with `node=None, graph=None`.
-- **A lidar re-created on a path that previously held one never returned a point** — the old prim survives as a `Camera` and the new sensor binds to it, while `create_lidar` reported success.
 
 ### Notes
 - Verified on device on Isaac Sim 5.1.0, 6.0.1 PhysX and 6.0.1 Newton, cold-booted one instance at a time with the GUI.
 - Only one Isaac Sim instance can run at a time on a single GPU; a second concurrent instance caused device-lost crashes during testing.
-- Hot-reload script (`scripts/dev_mcp_server.sh`) now reloads `adapters.v6` alongside `adapters.v5`.
 
 ## [0.5.2] - 2026-04-07
 
