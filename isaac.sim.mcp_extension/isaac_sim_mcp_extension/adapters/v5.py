@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .base import IsaacAdapterBase
+from .base import IsaacAdapterBase, collect_prims, drop_stale_bytecode
 from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 
@@ -112,6 +112,9 @@ class IsaacAdapterV5(IsaacAdapterBase):
     def delete_prim(self, prim_path: str) -> bool:
         import omni.kit.commands
 
+        # A live sensor keeps its prim alive and re-creates it after a delete;
+        # see prepare_prim_for_delete.
+        self.prepare_prim_for_delete(prim_path)
         omni.kit.commands.execute("DeletePrims", paths=[prim_path])
         return True
 
@@ -183,6 +186,72 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
         return add_reference_to_stage(usd_path, prim_path)
 
+    def _refresh_stale_physics_view(self) -> bool:
+        """Rebuild the physics view after an articulation read found it stale.
+
+        The view is a process-level singleton that enumerates articulations when
+        it is built, and Kit only ever invalidates it from `_on_stop` — a
+        *timeline STOP event*. The MCP debug loop is step-only and never plays,
+        so that event never fires: the view built for the first robot survives
+        clear_scene, still points at the deleted prims, and never learns about
+        articulations added later. SingleArticulation.initialize() then fails
+        with "'NoneType' object has no attribute 'link_names'", which the read
+        path swallows, so every joint read reports 0 DOF from the second robot
+        of a session onward — permanently. Measured on 5.1: cycle 1 of
+        clear -> physics -> robot reads 9 DOF, cycles 2-4 read 0, with the sim
+        view object identical (same id) across all four.
+
+        Two constraints learned the hard way, both by crashing the simulator:
+
+        * This runs ONLY from the read path, after a read has already failed —
+          never eagerly on asset creation. Rebuilding on every add_reference
+          call killed Kit with "PhysX ABORT: cannot start GPU simulation
+          because of previous CUDA errors! Error code 700" during the
+          integration suite (43/43 passing without it, hard crash with it).
+        * It refuses while the timeline is live. initialize_physics() drives
+          start_simulation()/fetch_results(), and doing that underneath a
+          running scene is what corrupts the GPU pipeline.
+
+        Returns True when the view was actually rebuilt and the read is worth
+        retrying.
+        """
+        import omni.timeline
+
+        timeline = omni.timeline.get_timeline_interface()
+        # Refuse only while the timeline is LIVE, not merely paused.
+        # step_simulation leaves the timeline PAUSED, which is exactly where a
+        # stale view gets discovered, so requiring is_stopped() meant the heal
+        # never ran there. Measured on 5.1 with two robots: with the stricter
+        # guard, deleting one left the survivor's reads and commands falling
+        # through to the drive-target fallback (6/9 checks); allowing paused
+        # restores them to physics-backed (8/9).
+        if timeline.is_playing():
+            return False
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+        except ImportError:
+            return False
+        try:
+            for attr in ("_physics_sim_view", "_physics_sim_view__warp"):
+                view = getattr(SimulationManager, attr, None)
+                if view is not None:
+                    try:
+                        view.invalidate()
+                    except Exception:
+                        pass
+                    setattr(SimulationManager, attr, None)
+            SimulationManager._simulation_view_created = False
+            # _create_simulation_view is subscribed to PHYSICS_WARMUP, and
+            # initialize_physics() only dispatches that event while
+            # _warmup_needed is set — normally by the STOP callback.
+            SimulationManager._warmup_needed = True
+            self._resync_physics_scene_cache()
+            SimulationManager.initialize_physics()
+            return True
+        except Exception as exc:
+            print(f"_refresh_stale_physics_view: could not rebuild the physics view ({exc})")
+            return False
+
     def set_prim_transform(
         self,
         prim_path: str,
@@ -211,16 +280,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
             raise ValueError(f"Prim not found: {prim_path}")
         return read_transform(UsdGeom.Xformable(prim))
 
-    def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
+    def list_prims(
+        self, root_path: str = "/", prim_type: Optional[str] = None, recursive: bool = False
+    ) -> List[Dict[str, str]]:
         stage = self.get_stage()
         root = stage.GetPrimAtPath(root_path)
-        results: List[Dict[str, str]] = []
-        for prim in root.GetAllChildren():
-            ptype = prim.GetTypeName()
-            if prim_type and ptype != prim_type:
-                continue
-            results.append({"path": str(prim.GetPath()), "type": ptype})
-        return results
+        return collect_prims(root, prim_type=prim_type, recursive=recursive)
 
     def get_prim_info(self, prim_path: str) -> Dict[str, Any]:
         stage = self.get_stage()
@@ -434,13 +499,15 @@ class IsaacAdapterV5(IsaacAdapterBase):
         # Try to get joint info via articulation API (requires running sim)
         joint_names: List[str] = []
         num_dof = 0
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+
+        def _info():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
-            joint_names = list(art.dof_names) if art.dof_names else []
-            num_dof = art.num_dof if art.num_dof else 0
-        except Exception:
-            pass
+            return (list(art.dof_names) if art.dof_names else [], art.num_dof if art.num_dof else 0)
+
+        info, ok = self._try_articulation(_info)
+        if ok and info:
+            joint_names, num_dof = info
 
         # Fallback: discover joints by traversing USD stage
         stage = self.get_stage()
@@ -492,16 +559,25 @@ class IsaacAdapterV5(IsaacAdapterBase):
         from isaacsim.core.prims import SingleArticulation
         from isaacsim.core.utils.types import ArticulationAction
 
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+        def _apply():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
             action = ArticulationAction(
                 joint_positions=np.array(positions),
                 joint_indices=np.array(joint_indices) if joint_indices else None,
             )
-            controller = art.get_articulation_controller()
-            controller.apply_action(action)
-        except Exception:
+            art.get_articulation_controller().apply_action(action)
+            return True
+
+        _result, applied = self._try_articulation(_apply)
+        # Record which one landed. A drive target is authored into USD and does
+        # not reach the solver until physics initializes again, so the caller
+        # has to be able to tell it from a live articulation command -- the
+        # handler reported the same success for both.
+        self._note_joint_command_source(
+            self.JOINT_COMMAND_ARTICULATION if applied else self.JOINT_COMMAND_DRIVE_TARGETS
+        )
+        if not applied:
             # Fallback: set USD drive targets directly (works when sim is stopped)
             self._set_joint_drive_targets(prim_path, positions, joint_indices)
 
@@ -550,13 +626,15 @@ class IsaacAdapterV5(IsaacAdapterBase):
         from isaacsim.core.prims import SingleArticulation
 
         self._ensure_physics_world()
-        art = SingleArticulation(prim_path=prim_path)
-        try:
+
+        def _names():
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
-            if art.dof_names:
-                return list(art.dof_names)
-        except Exception:
-            pass
+            return list(art.dof_names) if art.dof_names else None
+
+        names_from_physics, ok = self._try_articulation(_names)
+        if ok and names_from_physics:
+            return names_from_physics
 
         # Fallback: traverse USD
         from pxr import Usd, UsdPhysics
@@ -571,23 +649,69 @@ class IsaacAdapterV5(IsaacAdapterBase):
                 names.append(desc.GetName())
         return names
 
-    def get_joint_positions(self, prim_path: str) -> List[float]:
+    def _try_articulation(self, operation):
+        """Run an articulation operation, healing a stale physics view once.
+
+        Every articulation entry point hits the same wall: the view is rebuilt
+        only by Kit's timeline STOP callback, which a step-only session never
+        fires, so anything created after the view was built is invisible to it.
+        Reads degrade to USD fallbacks (see get_joint_positions), but a *command*
+        has nowhere to degrade to — measured on 5.1, commanding joints without a
+        prior read left the arm at 0.000 after 120 steps against a target of
+        -0.400, because the robot was not in the simulation at all.
+
+        Returns (result, True) when the operation ran, (None, False) otherwise,
+        so callers keep their own USD fallbacks for the genuinely-unavailable
+        case. The refresh declines while the timeline is live, so this is inert
+        during a play run.
+        """
+        try:
+            return operation(), True
+        except Exception:
+            pass
+        if self._refresh_stale_physics_view():
+            try:
+                return operation(), True
+            except Exception:
+                pass
+        return None, False
+
+    def _articulation_positions(self, prim_path: str) -> Optional[List[float]]:
+        """Joint positions from the physics view, or None when it cannot serve them."""
         from isaacsim.core.prims import SingleArticulation
 
-        # Ensure physics is initialized so SingleArticulation.initialize() works
-        self._ensure_physics_world()
-
-        art = SingleArticulation(prim_path=prim_path)
         try:
+            art = SingleArticulation(prim_path=prim_path)
             art.initialize()
             positions = art.get_joint_positions()
             if positions is not None:
                 return positions.tolist()
         except Exception:
-            pass
+            return None
+        return None
+
+    # NOTE: get_joint_positions drives the retry itself so it can tag
+    # position_source on the fallback; the helper covers everything else.
+
+    def get_joint_positions(self, prim_path: str) -> List[float]:
+
+        # Ensure physics is initialized so SingleArticulation.initialize() works
+        self._ensure_physics_world()
+
+        positions = self._articulation_positions(prim_path)
+        if positions is None and self._refresh_stale_physics_view():
+            # The physics view outlived the prims it was built against; it has
+            # been rebuilt, so the same read is worth exactly one retry.
+            positions = self._articulation_positions(prim_path)
+        if positions is not None:
+            self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
+            return positions
 
         # Fallback: read drive target positions from USD
-        # WARNING: these are authored targets, not actual physics positions
+        # WARNING: these are authored targets, not actual physics positions —
+        # they echo whatever set_joint_positions last wrote. Tagged so the
+        # caller is told, rather than mistaking a command for a measurement.
+        self._note_joint_source(self.JOINT_SOURCE_DRIVE_TARGETS)
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()
@@ -886,6 +1010,9 @@ class IsaacAdapterV5(IsaacAdapterBase):
 
     # 5.1 exposes the decoded point cloud through this annotator; 6.0 replaced
     # it with a packed generic-model-output buffer (see v6.get_lidar_point_cloud).
+    # 5.1's LidarRtx takes config_file_name and applies the preset.
+    SUPPORTS_LIDAR_CONFIG = True
+
     LIDAR_POINT_CLOUD_ANNOTATOR = "IsaacExtractRTXSensorPointCloudNoAccumulator"
 
     def _lidar_sensor(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
@@ -1037,21 +1164,60 @@ class IsaacAdapterV5(IsaacAdapterBase):
         omni.kit.commands.execute("CopyPrim", path_from=source_path, path_to=target_path)
 
     def import_urdf(self, urdf_path: str, prim_path: str = "/World/robot", **kwargs) -> Any:
+        # URDFImportRobot needs the *parsed* robot object; without urdf_robot it
+        # calls import_robot(None) and returns (False, None). And its dest_path
+        # is a USD *file* path to write (it runs Usd.Stage.CreateNew on it), not
+        # a prim path — passing "/World/robot" made it try to author a stage at
+        # that filename. Both mistakes failed silently: the command's False was
+        # returned unchecked, so the handler reported a successful import while
+        # nothing whatsoever landed on the stage. Verified on 5.1 against three
+        # different URDFs (fr3, lula_franka_gen, cobotta_pro_900): status
+        # success, requested prim absent, zero articulations on the stage.
+        #
+        # dest_path="" imports in-memory onto the open stage and returns the
+        # prim path it chose (the robot's own name, e.g. "/fr3"), so the result
+        # is moved to the requested prim_path and verified before returning.
         import os
 
         if not os.path.isfile(urdf_path):
             raise FileNotFoundError(f"URDF file not found: {urdf_path}")
         import omni.kit.commands
 
-        status, import_config = omni.kit.commands.execute("URDFCreateImportConfig")
-        omni.kit.commands.execute("URDFParseFile", urdf_path=urdf_path, import_config=import_config)
-        result = omni.kit.commands.execute(
+        _status, import_config = omni.kit.commands.execute("URDFCreateImportConfig")
+        parsed, urdf_robot = omni.kit.commands.execute(
+            "URDFParseFile", urdf_path=urdf_path, import_config=import_config
+        )
+        if not parsed or urdf_robot is None:
+            raise RuntimeError(f"URDF parse failed for {urdf_path}")
+
+        imported, imported_path = omni.kit.commands.execute(
             "URDFImportRobot",
             urdf_path=urdf_path,
+            urdf_robot=urdf_robot,
             import_config=import_config,
-            dest_path=prim_path,
+            dest_path="",
         )
-        return result
+        if not imported or not imported_path:
+            raise RuntimeError(f"URDF import failed for {urdf_path} (importer returned no prim)")
+
+        return self._relocate_imported_prim(imported_path, prim_path)
+
+    def _relocate_imported_prim(self, imported_path: str, prim_path: str) -> str:
+        """Move a freshly imported robot to the requested path; report where it really is."""
+        stage = self.get_stage()
+        if not prim_path or imported_path == prim_path:
+            return imported_path
+        try:
+            import omni.kit.commands
+
+            omni.kit.commands.execute("MovePrim", path_from=imported_path, path_to=prim_path)
+        except Exception:
+            pass
+        # Never claim a path that is not on the stage — that is the bug this
+        # whole method exists to stop.
+        if stage.GetPrimAtPath(prim_path):
+            return prim_path
+        return imported_path
 
     # ── Simulation ─────────────────────────────────────────
 
@@ -1287,6 +1453,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
         parent_dir = os.path.dirname(os.path.abspath(file_path))
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
+        # Both branches below need this, not just the reload. Python's
+        # FileFinder caches a directory listing, so a controller written moments
+        # ago is invisible to import_module even with its directory on sys.path
+        # -- measured on 5.1.0: ModuleNotFoundError before invalidate_caches(),
+        # imported fine straight after.
+        importlib.invalidate_caches()
 
         # Clean up previous exec() namespace for this file (unsubscribe orphaned callbacks)
         abs_path = os.path.abspath(file_path)
@@ -1319,6 +1491,12 @@ class IsaacAdapterV5(IsaacAdapterBase):
             if module_name:
                 # Reload existing module or import for first time
                 if module_name in sys.modules:
+                    # Drop the cached bytecode first: reload() alone re-ran the
+                    # previous contents for a same-length edit and still
+                    # reported success (issue #27).
+                    existing = getattr(sys.modules[module_name], "__file__", None)
+                    if existing:
+                        drop_stale_bytecode(existing)
                     _module = importlib.reload(sys.modules[module_name])
                     msg = f"Module '{module_name}' reloaded successfully"
                 else:

@@ -37,6 +37,17 @@ logger = logging.getLogger("IsaacMCPServer")
 DEFAULT_PORT = 8766
 
 
+class IsaacCommandError(Exception):
+    """The extension received the command and refused it.
+
+    Distinct from a transport failure: the socket is healthy and the message is
+    the handler's own. Keeping the two apart matters twice over — the message
+    must reach the caller unrewritten so an agent fixes its input instead of
+    reconnecting, and the socket must survive, because a rejected command costs
+    nothing and a redial is not free.
+    """
+
+
 @dataclass
 class IsaacConnection:
     """Manages a persistent TCP socket connection to the Isaac Sim extension."""
@@ -158,8 +169,12 @@ class IsaacConnection:
             response = json.loads(response_data.decode("utf-8"))
 
             if response.get("status") == "error":
-                raise Exception(response.get("message", "Unknown error from Isaac"))
+                raise IsaacCommandError(response.get("message", "Unknown error from Isaac"))
             return response.get("result", {})
+        except IsaacCommandError:
+            # The command round-tripped; only the command failed. Leave the
+            # socket alone and let the handler's message through untouched.
+            raise
         except socket.timeout:
             self.sock = None
             raise Exception("Timeout waiting for Isaac response")

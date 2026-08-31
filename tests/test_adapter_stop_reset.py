@@ -25,6 +25,7 @@
 
 import ast
 import os
+import textwrap
 
 ADAPTERS = os.path.join(
     os.path.dirname(__file__),
@@ -44,10 +45,32 @@ def _stop_body_src(filename):
     return ""
 
 
-def test_v6_stop_resets_physics():
+def test_v6_stop_restores_spawn_state_via_the_timeline():
+    """`assert "reset" in src.lower()` passed on a comment, so it could not fail.
+
+    It also described the wrong mechanism. v6.stop() deliberately calls only
+    timeline.stop(), which already restores rigid bodies and articulations to
+    their spawn pose. A SimulationManager.reset_simulation() call used to sit
+    here and was removed: the attribute does not exist, so it raised on every
+    stop into a bare except.
+
+    So assert the two things that are actually true — the timeline is stopped,
+    and the call that never worked has not come back.
+    """
+    import ast
+
     src = _stop_body_src("v6.py")
-    assert "reset" in src.lower()
-    assert "stop()" in src  # still stops the timeline first
+    tree = ast.parse(textwrap.dedent(src))
+
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            called.add(node.func.attr)
+
+    assert "stop" in called, f"stop() no longer stops the timeline; calls={sorted(called)}"
+    assert "reset_simulation" not in called, (
+        "SimulationManager.reset_simulation() is back; it does not exist on 6.0 and raises on every stop"
+    )
 
 
 def test_v6_arm_reset_point_lands_the_transition_before_returning():
@@ -233,3 +256,83 @@ def test_physics_warm_skipped_without_a_scene():
         if isinstance(node, ast.FunctionDef) and node.name == "_ensure_physics_world":
             src = ast.get_source_segment(text, node)
     assert "_stage_has_physics_scene" in src, "must skip warming when the stage has no PhysicsScene"
+
+
+def _v5_function_src(name):
+    """Source of a named method in v5.py, for invariant checks."""
+    import ast
+    import os
+
+    with open(os.path.join(ADAPTERS, "v5.py")) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node)
+    return ""
+
+
+def test_v5_refreshes_the_physics_view_from_the_read_path():
+    """A joint read must be able to heal a physics view that outlived its prims.
+
+    Kit invalidates the view only from its timeline STOP callback. The MCP debug
+    loop is step-only and never plays, so after clear_scene the view still
+    points at deleted prims and never sees articulations created afterwards:
+    SingleArticulation.initialize() fails with "'NoneType' object has no
+    attribute 'link_names'" and every joint read reports 0 DOF from the second
+    robot of a session onward. Measured on 5.1: 9 DOF on cycle 1, then 0 on
+    cycles 2-4, with the sim view object identical across all four.
+    """
+    src = _v5_function_src("get_joint_positions")
+    assert src, "get_joint_positions not found"
+    assert "_refresh_stale_physics_view" in src, "a failed articulation read must rebuild the stale view and retry"
+
+
+def test_v5_view_refresh_never_runs_eagerly_on_asset_creation():
+    """Rebuilding on every asset add crashed the simulator — keep it off that path.
+
+    initialize_physics() drives start_simulation()/fetch_results(); calling that
+    each time a reference lands killed Kit with "PhysX ABORT: cannot start GPU
+    simulation because of previous CUDA errors! Error code 700" during the
+    integration suite, which passes 43/43 without it. The refresh belongs only
+    where a read has already proven the view is stale.
+    """
+    for name in ("add_reference_to_stage", "import_urdf"):
+        src = _v5_function_src(name)
+        assert src, f"{name} not found"
+        code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+        assert "refresh" not in code, f"{name} must not rebuild the physics view eagerly — it crashes PhysX"
+
+
+def test_v5_view_refresh_refuses_while_the_timeline_is_live():
+    """Rebuilding underneath a running scene is what corrupts the GPU pipeline."""
+    src = _v5_function_src("_refresh_stale_physics_view")
+    assert src, "_refresh_stale_physics_view not found"
+    assert "is_playing" in src and "is_stopped" in src, "the refresh must refuse unless the timeline is stopped"
+    assert "initialize_physics" in src, "the rebuild goes through the warmup event"
+    assert "world.initialize_physics" not in src.lower().replace(" ", ""), (
+        "World.initialize_physics() calls play() and would start the timeline under a step-only session"
+    )
+
+
+def test_v5_commands_heal_a_stale_view_instead_of_vanishing():
+    """A joint command has no fallback that can move a robot — it must retry.
+
+    Reads degrade to USD values when the physics view is stale, but a command
+    written to a view that does not contain the robot simply does nothing.
+    Measured on 5.1: commanding joints without a prior read (which is what
+    heals the view) left the arm at 0.000 after 120 steps against a target of
+    -0.400, and set_joint_positions reported an error.
+    """
+    for name in ("set_joint_positions", "_get_joint_names", "get_robot_joint_info"):
+        src = _v5_function_src(name)
+        assert src, f"{name} not found"
+        assert "_try_articulation" in src, f"{name} must heal a stale physics view and retry once"
+
+
+def test_v5_articulation_retry_goes_through_the_guarded_refresh():
+    """The retry must inherit the crash-safety guard, not re-implement it."""
+    src = _v5_function_src("_try_articulation")
+    assert src, "_try_articulation not found"
+    assert "_refresh_stale_physics_view" in src, "the retry must use the guarded refresh"
+    assert "initialize_physics" not in src, "the helper must not drive physics init directly"

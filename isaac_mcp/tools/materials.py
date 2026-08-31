@@ -38,6 +38,7 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def create_material(
         material_type: str = "pbr",
         prim_path: Optional[str] = None,
+        material_path: Optional[str] = None,
         color: Optional[List[float]] = None,
         roughness: float = 0.5,
         metallic: float = 0.0,
@@ -47,6 +48,12 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         Args:
             material_type: "pbr" for visual material or "physics" for physics material.
             prim_path: Prim path for the material. Auto-generated if not set.
+            material_path: Alias for prim_path. apply_material names this
+                argument material_path, and an unknown argument is dropped
+                silently rather than rejected — so asking for
+                material_path="/World/Looks/Red" used to succeed while creating
+                the material somewhere else entirely, and the follow-up
+                apply_material then failed on a path that was never used.
             color: [r, g, b] diffuse color (0-1). PBR only.
             roughness: Surface roughness (0-1). PBR only.
             metallic: Metallic value (0-1). PBR only.
@@ -54,8 +61,9 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         try:
             conn = get_connection()
             params = {"material_type": material_type, "roughness": roughness, "metallic": metallic}
-            if prim_path:
-                params["prim_path"] = prim_path
+            path = prim_path or material_path
+            if path:
+                params["prim_path"] = path
             if color:
                 params["color"] = color
             result = conn.send_command("materials.create", params)

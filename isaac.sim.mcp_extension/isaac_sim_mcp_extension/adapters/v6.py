@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .base import IsaacAdapterBase
+from .base import IsaacAdapterBase, collect_prims, drop_stale_bytecode, spherical_to_cartesian
 from .transforms import read_transform, set_transform
 from .units import limit_units, normalize_limit
 from .version import version_string
@@ -108,10 +108,13 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
             def _on_timeline_stop(_event):
                 self._articulations.clear()
-                # Sensor wrappers hold annotator subscriptions; drop them on
-                # stop so a fresh play cycle re-registers cleanly.
-                self._camera_sensors.clear()
-                self._lidar_sensors.clear()
+                # Sensor wrappers hold annotator subscriptions and a render
+                # product; release them on stop so a fresh play cycle
+                # re-registers cleanly. Dropping the dict entry is not enough --
+                # the subscriptions keep the wrapper, and the wrapper keeps its
+                # prim, so the camera then could not be deleted and its render
+                # product kept rendering. See base.release_sensor.
+                self.release_all_sensors()
 
             self._timeline_stop_subscription = carb.eventdispatcher.get_eventdispatcher().observe_event(
                 event_name=omni.timeline.GLOBAL_EVENT_STOP,
@@ -120,6 +123,20 @@ class IsaacAdapterV6(IsaacAdapterBase):
             )
         except Exception:
             pass
+
+    @property
+    def engine(self) -> str:
+        """Public form of `_engine`, which the base declares and handlers ask.
+
+        Kept as a thin alias: `_engine` has a dozen callers inside this adapter
+        and its docstring carries the boot-order evidence for why it must stay
+        a live read.
+        """
+        return self._engine
+
+    def strands_first_rtx_camera(self) -> bool:
+        """6.0 cannot remove the first RTX camera of a session (#20)."""
+        return True
 
     @property
     def _engine(self) -> str:
@@ -227,6 +244,9 @@ class IsaacAdapterV6(IsaacAdapterBase):
     def delete_prim(self, prim_path: str) -> bool:
         import omni.kit.commands
 
+        # A live sensor keeps its prim alive and re-creates it after a delete;
+        # see prepare_prim_for_delete.
+        self.prepare_prim_for_delete(prim_path)
         omni.kit.commands.execute("DeletePrims", paths=[prim_path])
         return True
 
@@ -254,6 +274,31 @@ class IsaacAdapterV6(IsaacAdapterBase):
         # adapters/transforms.py.
         set_transform(xformable, position=position, rotation=rotation, scale=scale)
 
+    def _simulated_position(self, prim_path: str) -> Optional[List[float]]:
+        """World position from the physics view, or None if it cannot be read.
+
+        Newton writes simulated transforms to Fabric and never back to USD, so a
+        USD read reports the spawn pose forever: measured on 6.0.1, a body
+        genuinely falling at -9.81 m/s still read z=20.0 through
+        GetLocalTransformation, at every point during play. The physics view has
+        the truth (19.54 while USD said 20.0), so rigid bodies are read from
+        there on that engine.
+
+        PhysX is left on the USD path deliberately: it writes back, and the USD
+        read carries the prim's own local transform rather than a world pose,
+        which is what the rest of this API reports.
+        """
+        try:
+            from isaacsim.core.experimental.prims import RigidPrim
+
+            positions, _ = RigidPrim(prim_path).get_world_poses()
+            array = positions.numpy() if hasattr(positions, "numpy") else positions
+            return [float(array[0][0]), float(array[0][1]), float(array[0][2])]
+        except Exception:
+            # Not a rigid body, physics not initialised, or the view is not
+            # ready — the USD value is the best available answer.
+            return None
+
     def get_prim_transform(self, prim_path: str) -> Dict[str, Any]:
         from pxr import UsdGeom
 
@@ -261,18 +306,43 @@ class IsaacAdapterV6(IsaacAdapterBase):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
             raise ValueError(f"Prim not found: {prim_path}")
-        return read_transform(UsdGeom.Xformable(prim))
+        transform = read_transform(UsdGeom.Xformable(prim))
+        if self._engine == "newton":
+            # Newton writes simulated poses to Fabric, not to USD, so the USD
+            # xform keeps reading the *spawn* pose no matter how far the body
+            # has moved. Reporting that unlabelled is the same silent wrong
+            # answer as the joint-read echo: measured on 6.0.1, a sphere resting
+            # on the ground still read z=2.0 from USD.
+            simulated, served = self._try_articulation(lambda: self._simulated_position(prim_path))
+            if served and simulated is not None:
+                transform["position"] = simulated
+                transform["position_source"] = "physics"
+            elif self._prim_is_rigid_body(prim):
+                # Only rigid bodies move under physics; for everything else USD
+                # is the authority and a tag would be noise.
+                transform["position_source"] = "usd"
+                transform["position_warning"] = (
+                    "Newton keeps simulated poses in Fabric, and this position could not be read from "
+                    "physics — it is the authored USD pose, which is the spawn pose for a body that has "
+                    "been simulated. Step the simulation and retry, or read the body through get_physics_state."
+                )
+        return transform
 
-    def list_prims(self, root_path: str = "/", prim_type: Optional[str] = None) -> List[Dict[str, str]]:
+    @staticmethod
+    def _prim_is_rigid_body(prim) -> bool:
+        try:
+            from pxr import UsdPhysics
+
+            return bool(prim.HasAPI(UsdPhysics.RigidBodyAPI))
+        except Exception:
+            return False
+
+    def list_prims(
+        self, root_path: str = "/", prim_type: Optional[str] = None, recursive: bool = False
+    ) -> List[Dict[str, str]]:
         stage = self.get_stage()
         root = stage.GetPrimAtPath(root_path)
-        results: List[Dict[str, str]] = []
-        for prim in root.GetAllChildren():
-            ptype = prim.GetTypeName()
-            if prim_type and ptype != prim_type:
-                continue
-            results.append({"path": str(prim.GetPath()), "type": ptype})
-        return results
+        return collect_prims(root, prim_type=prim_type, recursive=recursive)
 
     def get_prim_info(self, prim_path: str) -> Dict[str, Any]:
         stage = self.get_stage()
@@ -536,7 +606,7 @@ class IsaacAdapterV6(IsaacAdapterBase):
     ) -> None:
         import warp as wp
 
-        try:
+        def _apply():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
             positions_arr = wp.array(np.asarray([list(positions)], dtype=np.float32), dtype=wp.float32)
@@ -545,9 +615,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 art.set_dof_position_targets(positions_arr, indices=idx_arr)
             else:
                 art.set_dof_position_targets(positions_arr)
+            return True
+
+        _result, applied = self._try_articulation(_apply)
+        # Record which one landed -- see the V5 note. A drive target does not
+        # reach the solver until physics initializes again, and on Newton that
+        # is the difference between a command and a no-op.
+        self._note_joint_command_source(
+            self.JOINT_COMMAND_ARTICULATION if applied else self.JOINT_COMMAND_DRIVE_TARGETS
+        )
+        if applied:
             return
-        except Exception:
-            pass
         # USD-drive fallback (sim stopped / articulation not yet initialised)
         self._set_joint_drive_targets(prim_path, positions, joint_indices)
 
@@ -587,13 +665,14 @@ class IsaacAdapterV6(IsaacAdapterBase):
                 drive.GetTargetPositionAttr().Set(float(value * 100.0))
 
     def _get_joint_names(self, prim_path: str) -> List[str]:
-        try:
+        def _names():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
-            if art.dof_names:
-                return list(art.dof_names)
-        except Exception:
-            pass
+            return list(art.dof_names) if art.dof_names else None
+
+        names, served = self._try_articulation(_names)
+        if served and names:
+            return names
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()
@@ -607,17 +686,24 @@ class IsaacAdapterV6(IsaacAdapterBase):
         return names
 
     def get_joint_positions(self, prim_path: str) -> List[float]:
-        try:
+        def _read():
             self._ensure_physics_world()
             art = self._new_articulation(prim_path)
             positions = art.get_dof_positions()
-            if positions is not None:
-                # batched (1, num_dofs) wp.array → flat list
-                arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
-                return arr.reshape(-1).tolist()
-        except Exception:
-            pass
-        # USD fallback identical to V5
+            if positions is None:
+                raise RuntimeError("articulation returned no dof positions")
+            # batched (1, num_dofs) wp.array → flat list
+            arr = positions.numpy() if hasattr(positions, "numpy") else np.asarray(positions)
+            return arr.reshape(-1).tolist()
+
+        values, served = self._try_articulation(_read)
+        if served and values is not None:
+            self._note_joint_source(self.JOINT_SOURCE_PHYSICS)
+            return values
+        # USD fallback identical to V5: authored drive targets, which echo the
+        # last set_joint_positions call. Tagged so a command cannot pass for a
+        # measurement.
+        self._note_joint_source(self.JOINT_SOURCE_DRIVE_TARGETS)
         from pxr import Usd, UsdPhysics
 
         stage = self.get_stage()
@@ -758,8 +844,349 @@ class IsaacAdapterV6(IsaacAdapterBase):
             SimulationManager._cleanup_stale_physics_scenes()
         except Exception:
             pass
-        SimulationManager.setup_simulation(dt=1.0 / 60.0)
+        self._guard_newton_unsupported_geometry()
+        # Keep whatever rate is already set. This runs from roughly nine call
+        # sites — every step, joint read and physics-state query — and passing
+        # a fixed dt reset the manager on each one. Measured on 6.0.1:
+        # set_physics_dt(1/240) took effect, then a single get_physics_state
+        # put it back to 1/60 with nothing said. set_physics_params tells the
+        # caller to set the rate through execute_script precisely because no
+        # adapter implements time_step, so this silently undid the documented
+        # workaround.
+        dt = 1.0 / 60.0
+        try:
+            current = SimulationManager.get_physics_dt()
+            if current and float(current) > 0:
+                dt = float(current)
+        except Exception:
+            pass  # no rate to preserve yet, or the manager cannot answer
+        SimulationManager.setup_simulation(dt=dt)
         SimulationManager.initialize_physics()
+
+    # Newton builds its model through SolverMuJoCo, whose geom_type_mapping has
+    # no entry for GeoType.CONE (9) — see solver_mujoco.py add_geoms(). Kit
+    # catches the resulting KeyError, logs "[Newton] Initialization failed:
+    # np.int32(9)", and latches NewtonStage._init_failed = True. That latch is
+    # permanent: initialize_newton() returns early forever after, so every
+    # later physics call dies with "Failed to create simulation view with
+    # backend 'newton'" and NOTHING recovers it — verified that deleting the
+    # cone, clear_scene, and rebuilding the PhysicsScene all still fail. Only a
+    # Kit restart clears it.
+    #
+    # Measured on 6.0.1-rc.7: cone + articulation bricks the session, while a
+    # cone alone, a cylinder + articulation, and cone + articulation under
+    # PhysX are all fine. Refusing before initialize_physics() keeps the latch
+    # from ever being set, which is the difference between one bad tool call
+    # and a dead simulator.
+    NEWTON_UNSUPPORTED_TYPES = ("Cone",)
+
+    # Newton's model builder also refuses a non-plane shape whose size is zero
+    # ("Only plane shapes are allowed to have a size of zero"), and that failure
+    # latches _init_failed exactly like the cone one does — same permanent kill,
+    # same restart-only recovery. Found by the edge suite, which creates a
+    # size=0 Cube: every later check reported a dead simulator.
+    NEWTON_SIZE_ATTRS = {
+        "Cube": ("size",),
+        "Sphere": ("radius",),
+        "Cylinder": ("radius", "height"),
+        "Cone": ("radius", "height"),
+        "Capsule": ("radius", "height"),
+    }
+
+    def _newton_zero_sized(self, prim) -> bool:
+        """True when this prim is a non-plane shape collapsed to zero size."""
+        attrs = self.NEWTON_SIZE_ATTRS.get(str(prim.GetTypeName()))
+        if not attrs:
+            return False
+        for name in attrs:
+            try:
+                attr = prim.GetAttribute(name)
+                if attr and attr.HasAuthoredValue() and float(attr.Get()) == 0.0:
+                    return True
+            except Exception:
+                continue
+        # A non-zero shape scaled flat reaches the solver the same way.
+        try:
+            scale = prim.GetAttribute("xformOp:scale")
+            value = scale.Get() if scale else None
+            if value is not None and any(float(c) == 0.0 for c in value):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _newton_unsupported_geometry(self) -> list:
+        """(path, reason) for prims that would brick Newton once an articulation exists."""
+        try:
+            stage = self.get_stage()
+        except Exception:
+            return []
+        if stage is None:
+            return []
+        blockers, has_articulation = [], False
+        try:
+            from pxr import UsdPhysics
+
+            articulation_api = getattr(UsdPhysics, "ArticulationRootAPI", None)
+            for prim in stage.Traverse():
+                if prim.GetTypeName() in self.NEWTON_UNSUPPORTED_TYPES:
+                    blockers.append((str(prim.GetPath()), "cone geometry"))
+                elif self._newton_zero_sized(prim):
+                    blockers.append((str(prim.GetPath()), "zero size"))
+                elif not has_articulation and self._is_articulation(prim, articulation_api):
+                    has_articulation = True
+        except Exception:
+            return []
+        return blockers if (blockers and has_articulation) else []
+
+    @staticmethod
+    def _is_articulation(prim, articulation_api) -> bool:
+        """Articulation test that survives a missing/renamed schema binding.
+
+        HasAPI() is the fast path; the applied-schema names are the fallback so
+        one AttributeError cannot quietly switch the cone guard off and let the
+        session get bricked instead.
+        """
+        if articulation_api is not None:
+            try:
+                return bool(prim.HasAPI(articulation_api))
+            except Exception:
+                pass
+        try:
+            return any("ArticulationRootAPI" in str(name) for name in prim.GetAppliedSchemas())
+        except Exception:
+            return False
+
+    def _guard_newton_unsupported_geometry(self) -> None:
+        """Refuse to initialise Newton physics on a stage that would latch it dead."""
+        if self._engine != "newton":
+            return
+        blockers = self._newton_unsupported_geometry()
+        if not blockers:
+            return
+        shown = ", ".join(f"{path} ({reason})" for path, reason in blockers[:5])
+        if len(blockers) > 5:
+            shown += " …"
+        raise RuntimeError(
+            "Newton cannot simulate this geometry together with an articulated robot: "
+            f"{shown}. Its MuJoCo solver has no cone shape, and rejects any non-plane "
+            "shape whose size is zero. Initialising anyway would permanently disable "
+            "physics for this Isaac Sim session (only a restart recovers it), so the "
+            "command was refused. Delete or resize the offending prim(s) — replace a "
+            "cone with Cylinder/Capsule/Sphere/Cube, give a zero-sized shape a real "
+            "size — or run this scene on the PhysX engine, which accepts both."
+        )
+
+    def _refresh_stale_physics_view(self) -> bool:
+        """Rebuild the physics view after an articulation call found it stale.
+
+        The tensor view enumerates articulations when it is built, and Kit only
+        rebuilds it from the timeline STOP callback. The MCP debug loop is
+        step-only and never stops, so adding a prim after the view exists — or
+        clearing and rebuilding the scene — leaves reads and commands pointing
+        at a view that does not contain the robot. Measured at HEAD on 6.0.1
+        PhysX: set_joint_positions, create a prim, step, then read, and the read
+        fell through to the USD drive targets and reported the commanded
+        -0.4000 back as a measurement.
+
+        initialize_physics() builds the views itself on 6.0 (unlike 5.1, which
+        needs the warmup event), but it early-returns unless _warmup_needed is
+        set — the flag Kit otherwise only sets on STOP.
+
+        Refuses while the timeline is live: driving start_simulation() under a
+        running scene is what aborted the GPU pipeline earlier in this project.
+        """
+        try:
+            import omni.timeline
+
+            if omni.timeline.get_timeline_interface().is_playing():
+                return False
+            from isaacsim.core.simulation_manager import SimulationManager
+        except Exception:
+            return False
+        try:
+            for attr in ("_physics_sim_view", "_physics_sim_view__warp"):
+                view = getattr(SimulationManager, attr, None)
+                if view is not None:
+                    try:
+                        view.invalidate()
+                    except Exception:
+                        pass
+                    setattr(SimulationManager, attr, None)
+            SimulationManager._simulation_view_created = False
+            SimulationManager._warmup_needed = True
+            SimulationManager.initialize_physics()
+            return SimulationManager.get_physics_sim_view() is not None
+        except Exception as exc:
+            print(f"_refresh_stale_physics_view: could not rebuild the physics view ({exc})")
+            return False
+
+    def _try_articulation(self, operation):
+        """Run an articulation operation, healing a stale physics view once.
+
+        Returns (result, True) when it ran, (None, False) otherwise, so callers
+        keep their USD fallbacks for the genuinely-unavailable case.
+        """
+        try:
+            return operation(), True
+        except Exception:
+            pass
+        if self._refresh_stale_physics_view():
+            try:
+                return operation(), True
+            except Exception:
+                pass
+        return None, False
+
+    def _newton_step_dt(self) -> float:
+        """Seconds per stepped frame, from the PhysicsScene, defaulting to 1/60."""
+        try:
+            scene_path = self._find_physics_scene()
+            if scene_path:
+                attr = self.get_stage().GetPrimAtPath(scene_path).GetAttribute("physxScene:timeStepsPerSecond")
+                rate = attr.Get() if attr else None
+                if rate:
+                    return 1.0 / float(rate)
+        except Exception:
+            pass
+        return 1.0 / 60.0
+
+    def _newton_step_direct(self, num_steps: int) -> bool:
+        """Advance Newton by exactly num_steps frames, without pumping the app.
+
+        NewtonStage.step_sim(dt) runs the solver directly and bumps sim_time and
+        simulation_step_count by exactly one frame per call. It was missed when
+        the pumped path was written: the APIs tried then were the PhysX-side
+        ones (SimulationManager.step, SimulationView.step, physx.update_
+        simulation), all of which leave Newton frozen, and the conclusion drawn
+        was that no direct solver step exists. It does.
+
+        Measured on 6.0.1-rc.7, 30 calls at dt=1/60 from a paused timeline:
+        sim_time 0.05000 -> 0.55000 and step count 3 -> 33, both exact, with the
+        timeline never playing and the body falling as expected. The pumped path
+        advances ~30.6 frames for the same request, because a pump runs a real
+        app frame whose physics substepping does not land on the boundary.
+
+        step_sim() only runs the solver while NewtonStage.playing is set, which
+        the timeline event otherwise drives, so it is set for the duration and
+        restored afterwards. Fabric holds Newton's simulated transforms, so
+        update_fabric() has to run before any read.
+
+        Returns False when this build cannot be stepped this way, so step()
+        falls back to the pump rather than silently doing nothing.
+        """
+        try:
+            import isaacsim.physics.newton as newton_ext
+
+            newton_stage = newton_ext.acquire_stage()
+        except Exception:
+            return False
+        if newton_stage is None:
+            return False
+        if not getattr(newton_stage, "initialized", False) or getattr(newton_stage, "_init_failed", False):
+            return False
+        step_sim = getattr(newton_stage, "step_sim", None)
+        if not callable(step_sim):
+            return False
+
+        dt = self._newton_step_dt()
+        was_playing = getattr(newton_stage, "playing", False)
+        try:
+            newton_stage.playing = True
+            for _ in range(num_steps):
+                step_sim(dt)
+        except Exception as exc:
+            print(f"_newton_step_direct: falling back to the pump ({exc})")
+            return False
+        finally:
+            try:
+                newton_stage.playing = was_playing
+            except Exception:
+                pass
+        try:
+            newton_stage.update_fabric()
+        except Exception as exc:
+            print(f"_newton_step_direct: update_fabric failed ({exc})")
+        return True
+
+    def _newton_model_bodies(self):
+        """(NewtonStage, set of body paths in its model) or (None, None)."""
+        try:
+            import isaacsim.physics.newton as newton_ext
+
+            newton_stage = newton_ext.acquire_stage()
+        except Exception:
+            return None, None
+        if newton_stage is None:
+            return None, None
+        model = getattr(newton_stage, "model", None)
+        if model is None:
+            return newton_stage, None
+        try:
+            return newton_stage, {str(path) for path in (getattr(model, "body_label", []) or [])}
+        except Exception:
+            return newton_stage, None
+
+    def _refresh_newton_model_if_stale(self) -> bool:
+        """Rebuild Newton's model when it no longer matches the stage.
+
+        Newton builds its model once and rebuilds it from the timeline STOP
+        event. A step-only debug loop never stops, so after a clear_scene the
+        model keeps the *deleted* prims and never learns about the new ones —
+        and Newton keeps stepping that phantom scene. Measured on 6.0.1-rc.7
+        through the tools: clear_scene from a paused timeline, create a sphere
+        at z=2, step 60, and it reports z=2.0 with zero velocity while
+        model.body_label still reads ['/World/Ball'] for a prim that no longer
+        exists. sim_time and the step counter advance throughout, so nothing
+        looks wrong. The same sphere dropped after a stop_simulation — which
+        does fire the rebuild — lands correctly at z=0.149.
+
+        Only the stopped/paused case is handled: rebuilding underneath a running
+        scene is the kind of thing that cost this project a GPU-level PhysX
+        abort, and while playing Kit maintains the model itself.
+        """
+        if self._engine != "newton":
+            return False
+        try:
+            import omni.timeline
+
+            if omni.timeline.get_timeline_interface().is_playing():
+                return False
+        except Exception:
+            return False
+
+        newton_stage, model_bodies = self._newton_model_bodies()
+        if newton_stage is None:
+            return False
+        # Kit has not built a model yet, or a previous build failed and latched
+        # (see the cone guard) — leave both alone.
+        if not getattr(newton_stage, "initialized", False) or getattr(newton_stage, "_init_failed", False):
+            return False
+
+        try:
+            from pxr import UsdPhysics
+
+            stage_bodies = {
+                str(prim.GetPath()) for prim in self.get_stage().Traverse() if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            }
+        except Exception:
+            return False
+
+        if model_bodies is not None and model_bodies == stage_bodies:
+            return False
+        # Same refusal as _ensure_physics_world: this rebuild calls
+        # initialize_newton() directly, so without the guard a cone or a
+        # zero-sized shape latches physics dead here instead — measured on
+        # 6.0.1-rc.7, where a size=0 Cube killed the simulator through this
+        # path while the guard on the other path never saw it.
+        self._guard_newton_unsupported_geometry()
+        try:
+            newton_stage.initialized = False
+            newton_stage.initialize_newton(None)
+        except Exception as exc:
+            print(f"_refresh_newton_model_if_stale: rebuild failed ({exc})")
+            return False
+        return not getattr(newton_stage, "_init_failed", False)
 
     def _arm_reset_point(self) -> None:
         """Give stop_simulation something to restore to, without running the sim.
@@ -880,6 +1307,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         if has_rb:
             lin_vel = [0.0, 0.0, 0.0]
             ang_vel = [0.0, 0.0, 0.0]
+            # Pre-seeded zeros made "no physics view", "view invalidated" and
+            # "genuinely at rest" indistinguishable: a moving body read as
+            # stationary with nothing said. V5 reports velocity_warning for its
+            # own version of this (PhysX write-back disabled); say so here too
+            # rather than passing an unmeasured zero off as a measurement.
+            measured = False
             try:
                 from isaacsim.core.simulation_manager import SimulationManager
 
@@ -892,10 +1325,17 @@ class IsaacAdapterV6(IsaacAdapterBase):
                         flat = arr.reshape(-1)[:6]
                         lin_vel = [float(flat[0]), float(flat[1]), float(flat[2])]
                         ang_vel = [float(flat[3]), float(flat[4]), float(flat[5])]
+                        measured = True
             except Exception:
                 pass
             result["linear_velocity"] = lin_vel
             result["angular_velocity"] = ang_vel
+            if not measured:
+                result["velocity_warning"] = (
+                    "The physics tensor view could not serve this read, so the velocities above "
+                    "are placeholder zeros, not a measurement -- a moving body looks identical to "
+                    "one at rest. Step the simulation at least once, and check get_isaac_logs."
+                )
 
         result["contacts"] = []
         return result
@@ -1008,6 +1448,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
             return np.zeros((0,), dtype=np.uint8)
         return data.numpy() if hasattr(data, "numpy") else np.asarray(data)
 
+    # 6.0's Lidar constructor takes only a path; presets are schema
+    # attributes applied afterwards, so the bare constructor yields a generic
+    # sensor. Measured on 6.0.1: config="Example_Rotary" and no config both
+    # produce model=LidarCore, channels=128.
+    SUPPORTS_LIDAR_CONFIG = False
+
     def create_lidar(self, prim_path: str, config: Optional[str] = None, **kwargs) -> Any:
         # 6.0 Lidar takes a single `path: str`. Hardware preset (formerly the
         # `config` arg) is now set through schema attributes after creation;
@@ -1062,7 +1508,35 @@ class IsaacAdapterV6(IsaacAdapterBase):
         x = np.asarray(gmo.x)[:count]
         y = np.asarray(gmo.y)[:count]
         z = np.asarray(gmo.z)[:count]
+        # x/y/z are only Cartesian when the sensor says so. The shipped rotary
+        # configs declare SPHERICAL, and returning those raw handed callers
+        # azimuth/elevation degrees under a "meters" label: a 2 m wall 3 m ahead
+        # came back spanning +-18.4 (its subtended angle) with a "z" of 3.0 (the
+        # range). Read the convention off the prim rather than assuming either.
+        if self._lidar_elements_are_spherical(prim_path):
+            rows = spherical_to_cartesian(x, y, z)
+            x = [r[0] for r in rows]
+            y = [r[1] for r in rows]
+            z = [r[2] for r in rows]
         return np.stack([x, y, z], axis=-1).astype(np.float32)
+
+    def _lidar_elements_are_spherical(self, prim_path: str) -> bool:
+        """Read `omni:sensor:Core:elementsCoordsType` off the lidar prim.
+
+        Defaults to True when the attribute is missing or unreadable: every
+        shipped rotary config measured on 6.0.1 is SPHERICAL, so assuming
+        Cartesian would silently restore the wrong-units bug.
+        """
+        try:
+            prim = self.get_stage().GetPrimAtPath(prim_path)
+            attr = prim.GetAttribute("omni:sensor:Core:elementsCoordsType")
+            if attr and attr.IsValid():
+                value = attr.Get()
+                if value is not None:
+                    return str(value).upper() == "SPHERICAL"
+        except Exception:
+            pass
+        return True
 
     # ── Materials ──────────────────────────────────────────
 
@@ -1260,9 +1734,89 @@ class IsaacAdapterV6(IsaacAdapterBase):
 
         self._ensure_physics_world()
         self._arm_reset_point()
-        SimulationManager.step(steps=num_steps)
+
+        # Newton is not driven by any direct solver step. Measured on 6.0.1
+        # under isaac-sim.newton.sh, dropping a body from z=20 for 60 steps
+        # where free fall predicts z=15.095:
+        #
+        #     SimulationManager.step      z=20.0000  vz=0.0000   no motion
+        #     SimulationView.step(dt)     z=20.0000  vz=0.0000   no motion
+        #     physx.update_simulation     z=20.0000  vz=0.0000   no motion
+        #     pumped app.update()         z=14.8918  vz=-10.0063 runs
+        #
+        # so on Newton the app tick is the only thing that advances the solver,
+        # and step_simulation silently froze the world without it. The pump is
+        # about one step plus render jitter off exact, which is the accuracy
+        # ceiling available there — reported as "approximate" rather than
+        # implied to match PhysX. PhysX keeps SimulationManager.step, which is
+        # frame-exact; pumping it instead changes its answers too (-2.987
+        # against -3.322 over the same fall).
+        approximate = self._engine == "newton"
+        suspended_graphs = []
+        rebuilt_model = False
+        if approximate:
+            import omni.kit.app
+            import omni.timeline
+
+            rebuilt_model = self._refresh_newton_model_if_stale()
+
+            timeline = omni.timeline.get_timeline_interface()
+            resume_paused = not timeline.is_playing()
+            stepped_directly = False
+            # Running the timeline evaluates Action Graphs, so a ScriptNode
+            # controller re-commands the robot on every stepped frame and
+            # silently discards the caller's set_joint_positions -- measured on
+            # Newton as 30 ScriptNode ticks during a 30-frame step. PhysX never
+            # needed this because SimulationManager.step pumps only the physics
+            # pipeline. Suspending keeps the debug loop the same shape on both
+            # engines: step on a frozen timeline with graphs quiet, play for the
+            # graph-driven run.
+            with self._graphs_suspended() as suspended:
+                suspended_graphs = [str(path) for path in suspended] if suspended else []
+                # Preferred: step the solver directly, which is frame-exact and
+                # never runs an app frame. The pump below is the fallback for
+                # builds without NewtonStage.step_sim.
+                stepped_directly = self._newton_step_direct(num_steps)
+                if not stepped_directly:
+                    if resume_paused:
+                        timeline.play()
+                    try:
+                        for _ in range(num_steps):
+                            omni.kit.app.get_app().update()
+                    finally:
+                        if resume_paused:
+                            # Pause, not stop: stop resets to the spawn pose and
+                            # throws away the physics result being measured.
+                            timeline.pause()
+        else:
+            SimulationManager.step(steps=num_steps)
+
+        if rebuilt_model:
+            # The rebuild itself leaves the tensor view usable, but the
+            # play/pump/pause cycle above then invalidates it, so the next
+            # articulation read degrades to the drive-target fallback and
+            # reports the caller's own command back (caught by position_source
+            # during testing). Re-prime once so reads stay physics-backed.
+            try:
+                self._ensure_physics_world()
+            except Exception as exc:
+                print(f"step: could not re-prime physics after a Newton model rebuild ({exc})")
 
         result: Dict[str, Any] = {"stepped": num_steps}
+        if rebuilt_model:
+            result["newton_model_rebuilt"] = True
+        if suspended_graphs:
+            result["graphs_suspended"] = suspended_graphs
+        if approximate:
+            if stepped_directly:
+                result["stepping"] = "exact"
+            else:
+                result["stepping"] = "approximate"
+                result["stepping_note"] = (
+                    "This build has no NewtonStage.step_sim, so the frames were advanced by pumping "
+                    "the app tick, which lands about one step past the requested count. Newton is "
+                    "still deterministic — repeated runs of the same scene agree bit for bit."
+                )
 
         if observe_prims:
             from pxr import UsdPhysics
@@ -1444,6 +1998,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         parent_dir = os.path.dirname(os.path.abspath(file_path))
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
+        # Both branches below need this, not just the reload. Python's
+        # FileFinder caches a directory listing, so a controller written moments
+        # ago is invisible to import_module even with its directory on sys.path
+        # -- measured on 5.1.0: ModuleNotFoundError before invalidate_caches(),
+        # imported fine straight after.
+        importlib.invalidate_caches()
 
         abs_path = os.path.abspath(file_path)
 
@@ -1473,6 +2033,12 @@ class IsaacAdapterV6(IsaacAdapterBase):
         try:
             if module_name:
                 if module_name in sys.modules:
+                    # Drop the cached bytecode first: reload() alone re-ran the
+                    # previous contents for a same-length edit and still
+                    # reported success (issue #27).
+                    existing = getattr(sys.modules[module_name], "__file__", None)
+                    if existing:
+                        drop_stale_bytecode(existing)
                     _module = importlib.reload(sys.modules[module_name])
                     msg = f"Module '{module_name}' reloaded successfully"
                 else:

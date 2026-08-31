@@ -17,6 +17,17 @@ keywords = ["mcp", "server", "socket", "simulation", "robotics"]
 # Optional so 5.1 loads (V5 sensors use isaacsim.sensors.* loaded by the app);
 # on 6.0 PhysX/Newton it resolves and the V6 adapter imports it lazily.
 "isaacsim.sensors.experimental.rtx" = { optional = true }
+# V5-only (5.1). Present in ~/isaacsim-5.1.0/exts and absent from 6.0.1
+# entirely, so these are optional for the same reason the line above is: a hard
+# dependency on a module the other runtime does not ship stops the extension
+# loading there. Declared rather than left implicit because v5.py imports them
+# at call time -- undeclared, they resolve only on an app that happens to
+# enable them, and a leaner one turns every V5 call into ModuleNotFoundError.
+"isaacsim.core.api" = { optional = true }
+"isaacsim.core.prims" = { optional = true }
+"isaacsim.core.utils" = { optional = true }
+"isaacsim.sensors.camera" = { optional = true }
+"isaacsim.sensors.rtx" = { optional = true }
 "isaacsim.asset.importer.urdf" = {}
 "omni.kit.uiapp" = {}
 "isaacsim.gui.components" = {}

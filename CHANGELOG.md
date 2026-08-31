@@ -7,133 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed / Changed — tool hardening for agent use
-- step_simulation now fails loud on a running timeline and the debug loop is
-  documented as step-only (never play while debugging). (#1)
-- create_action_graph gains inline_script= one-step shortcut; the broken inline
-  example is removed. (#2)
-- reload_script recompiles Action-Graph ScriptNodes that reference the edited
-  file, instead of silently no-oping. (#3)
-- get_isaac_logs: eager listener, run-scoped (since_last_play default),
-  non-destructive default, and captures print() as [PRINT]. (#4/#5)
-- execute_script documents that it can silently disturb a live ScriptNode. (#6)
-- create_object documents that scale= is a raw native-size multiplier. (#7)
-- stop_simulation resets the scene to spawn state. (#8)
+### Added
+- **Releases publish to the MCP Registry** — a tagged release now stamps the tag version into `server.json` and runs `mcp-publisher` (GitHub Actions OIDC, no stored secret) after the PyPI upload. The listing had been hand-published and sat at 0.4.1 while 0.5.0 through 0.6.0 shipped to PyPI.
 
-### Fixed — silent wrong answers found by live testing on 5.1.0 and 6.0.1
-
-Each of these was reproduced against a running simulator, one version at a
-time, and re-measured after the fix. Unit tests passed throughout: every one of
-them needs a real stage, a real physics step or a real referenced asset to show
-up at all.
-
-- **Joint limits were reported in degrees while positions were radians.**
-  `get_joint_config` returned USD's raw revolute limits: FR3 joint 1 read
-  `[-157.2, 157.2]` next to `actual_position=0.5`, where the real limit is
-  ±2.7437 rad. An agent clamping a target to those limits would command 25
-  revolutions. Limits now arrive in the same units as positions, with an
-  explicit `limit_units` per joint. Prismatic limits are deliberately untouched
-  — USD stores those in stage units, and converting them turns a 0.04 m gripper
-  stroke into 0.0007. `get_robot_info` previously advertised `"degrees"` for the
-  same attributes and now agrees. Both adapters. (`adapters/units.py`)
-- **A requested rotation compounded with the prim's existing orientation.**
-  `set_prim_transform` only ever wrote `xformOp:rotateXYZ`, so on a prim
-  carrying `xformOp:orient` the rotation was appended rather than replacing
-  anything, landing after `xformOp:scale`. On a prim with orient=90° and
-  scale=(1,2,1), asking for 45° produced 135° and a shear of 1.5. It already
-  bit in practice: 5.1 cameras ship `orient=(0.5,0.5,-0.5,-0.5)`, so
-  `create_camera(rotation=...)` could not aim a camera at all. Both adapters.
-  (`adapters/transforms.py`)
-- **`get_prim_info` had no rotation.** It returned position only, so "is this
-  prim rotated?" was unanswerable through the tools while the docstring
-  advertised the transform. It now reports rotation (XYZ degrees, the order
-  `transform_object` accepts) and scale, read off the orthonormalized matrix so
-  scale cannot corrupt the angle.
-- **Environments lost their axis and unit conversion.** USD authors
-  `unitsResolve` ops for a reference whose layer declares a different `upAxis`
-  or `metersPerUnit` — but only when the target prim has no pre-existing
-  children. `load_environment` referenced onto `/Environment`, which ships
-  `defaultLight`, so the conversion was skipped: a ground standing on edge,
-  10 km across, floor at z=-5000. That is 6 of 25 shipped environments on 5.1
-  and 8 of 28 on 6.0 by up-axis, 8 and 10 by units. It now references onto
-  `/Environment/<name>` and reports what USD applied under `corrections`, plus
-  `bounds` with extent and floor height. Both adapters.
-- **`clear_scene` did not clear a loaded environment**, so a later
-  `create_physics_scene(floor=True)` stacked a second ground under the first.
-  It now empties `/Environment` while always keeping `defaultLight` — an unlit
-  stage renders black, which reads as a broken sensor — and takes
-  `keep_environment` for callers who want to keep it. Reloading an environment
-  now replaces rather than stacking references.
-- **`stop_simulation` silently kept the stepped pose** when called promptly
-  after `step_simulation`. `_arm_reset_point` queues play/pause to give PhysX a
-  restore point, but timeline transitions are tick-driven, so the point landed
-  after `step()` returned. Deterministic on 6.0.1: a cube stepped from z=2.0
-  stayed at z=-3.32 through stop. Arming now pumps once so the transition lands.
-  The stepped result stays bit-identical. V6 only — V5 never had it. (#8 above
-  covers the reset itself.)
-- **`get_simulation_state` reported a Python repr as the version.** On 6.0
-  `get_version()` returns an 8-tuple, not a string, so clients saw
-  `"('6.0.1', 'rc.7', '6', ...)"` instead of `6.0.1-rc.7`. The same wrong
-  assumption made adapter selection load V5 on a 6.0 runtime; that half had been
-  fixed, this half had not. Both now read the duality from one place.
-  (`adapters/version.py`) V6 only.
-- **Both lidar tools were dead on 5.1.** `create_lidar` raised
-  `got multiple values for keyword argument 'config'` (5.1's `LidarRtx` takes
-  `config_file_name`), and `get_lidar_point_cloud` raised
-  `'LidarRtx' object has no attribute 'get_point_cloud'` (5.1 exposes annotators
-  plus `get_current_frame()`). The annotator must be attached *before*
-  `initialize()` and the wrapper must be cached, exactly as cameras already are.
-  V5 only — 6.0's lidar path was fixed earlier and left 5.1 behind.
-- **Commands sent during startup failed with a raw AttributeError.** The socket
-  accepts connections several seconds before Kit has a stage — measured on
-  6.0.1 at t+6.8s versus t+14.5s, and an MCP client normally connects the moment
-  the port opens. Every stage-dependent tool in that window returned
-  `'NoneType' object has no attribute 'GetPrimAtPath'`, which reads as a broken
-  server rather than one still starting. Dispatch now detects the pending stage
-  and returns a message saying to retry. Both adapters.
-- **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree
-  when a path did not exist. It validates both prims and names the offending
-  one. Both adapters.
-
-### Changed
-- `scripts/smoke_test_v6.py` is now `scripts/smoke_test.py` and runs against
-  either runtime, detecting the adapter from `simulation.get_state` and
-  asserting what is true for each — V5 must *not* grow the V6-only reporting
-  fields, so a misdetected adapter fails the run instead of passing quietly.
-  Several of its checks had encoded contracts the code deliberately no longer
-  has, or never had: two did `play` → `step` after that was made an error, and
-  the reset check read a top-level `position` from `get_prim_info`, which has
-  always nested it under `transform`.
-- `clear_scene` gains `keep_environment`; `load_environment` returns
-  `corrections` and `bounds`, and its `prim_path` now defaults to a named child
-  of `/Environment` — read it from the response rather than assuming it.
-
-### Known issues
-- `get_lidar_point_cloud` returns `point_count` without the points themselves on
-  6.0; the decoded cloud is discarded by the handler.
-- RTX camera render products are not released by `delete_object` or
-  `clear_scene`, so each camera created adds per-frame render work for the life
-  of the Kit process (measured on 6.0.1; unverified on 5.1).
-- `create_camera` has no look-at parameter, so aiming requires computing euler
-  angles by hand.
-- Only one Isaac Sim instance can run at a time on a single GPU; a second
-  concurrent instance caused device-lost crashes during testing.
-
-## [0.6.0] - 2026-06-13
+## [0.6.0] - 2026-08-31
 
 ### Added
 - **Isaac Sim 6.0.0 support** — new `IsaacAdapterV6` built on `isaacsim.core.experimental.*` + `SimulationManager` + `isaacsim.sensors.experimental.rtx` + `isaacsim.asset.importer.urdf.URDFImporter`. Works under both the PhysX launcher (`isaac-sim.sh`) and the Newton launcher (`isaac-sim.newton.sh`).
-- **Engine auto-detection** — `adapters/__init__.py:get_adapter()` reads `isaacsim.core.version.get_version()` and selects V5 or V6 by major version. V6 reads `SimulationManager.get_active_physics_engine()` at construction time.
+- **Newton engine parity** — stepping is engine-aware and frame-exact (`NewtonStage.step_sim`, reported as `stepping: "exact"`); positions come from Fabric, where Newton keeps its simulated transforms; the model is rebuilt when it diverges from the stage; and physics initialisation is refused on geometry the MuJoCo solver cannot build (cones, zero-sized shapes) rather than latching physics dead until Kit restarts.
+- **Engine auto-detection** — `adapters/__init__.py:get_adapter()` reads `isaacsim.core.version.get_version()` and selects V5 or V6 by major version. V6 reads `SimulationManager.get_active_physics_engine()` live, never cached.
 - **`engine` and `isaacsim_version` fields on `get_simulation_state`** — MCP clients can see the active backend without poking at the runtime.
+- **`position_source` on every joint read** — `get_joint_positions`, `step_simulation(observe_joints=...)` and `get_joint_config` all report whether a read measured physics or echoed the last command, and warn when it is an echo. `get_joint_config` drops `position_error` from an echoed read rather than reporting the 0.0 it derives from comparing a target with itself.
+- **`create_camera(target=...)`** — aim a camera at a point instead of by euler angles; the response echoes `aimed_at` and the `rotation` applied.
+- **`create_action_graph(inline_script=...)`** — one-step OnPlaybackTick → ScriptNode wiring.
+- **`get_lidar_point_cloud` returns the cloud** — summary by default, `max_points` for a strided sample, `output_path` to write the sweep as `.npy`.
+- **`clear_scene(keep_environment=...)`**; `load_environment` returns the `corrections` USD applied plus `bounds`.
+- **`list_prims(recursive=...)`** walks the whole subtree instead of one level, and the response echoes which listing it gave.
+- **`create_camera` warns on a 6.0 session's first RTX camera**, which cannot be removed for the life of the process.
 
 ### Changed
 - V6 URDF import uses `URDFImporter(URDFImporterConfig(...))` instead of the deprecated `URDFCreateImportConfig`/`URDFParseFile`/`URDFImportRobot` kit commands.
 - V6 physics state reads route through `SimulationManager.get_physics_simulation_view()` (the `omni.physics.tensors` view), replacing the V5 direct call to `omni.physx.get_physx_interface().get_rigidbody_transformation()` (which is unavailable under the Newton kit).
 - V6 sensor methods use `isaacsim.sensors.experimental.rtx.{RtxCamera,CameraSensor,Lidar,LidarSensor}` instead of the deprecated `isaacsim.sensors.camera.Camera` / `isaacsim.sensors.rtx.LidarRtx`.
+- **The debug loop is step-only** — `step_simulation` refuses a running timeline; `play_simulation` is for the final continuous run. `stop_simulation` resets to spawn state.
+- **Joint limits arrive in the same units as positions**, with `limit_units` per joint; `get_prim_info` reports rotation and scale, not position alone.
+- `load_environment` references onto `/Environment/<name>` — read `prim_path` from the response.
+- `create_material` accepts `material_path`, `reload_script` accepts `script_file` — FastMCP silently drops unknown keyword arguments.
+- `get_isaac_logs` is run-scoped, non-destructive, and captures `print()` as `[PRINT]`.
+- `scripts/smoke_test_v6.py` is now `scripts/smoke_test.py` and runs against either runtime.
+- Hot-reload (`scripts/dev_mcp_server.sh`) reloads `adapters.units` and `adapters.transforms` as well as `base`/`v5`/`v6`. `v5` and `v6` bind those names at module scope, so edits to the unit conversion or the `look_at` maths were invisible to a reload and a live measurement ran against stale code.
+- Live tests require `ISAAC_MCP_LIVE_TESTS=1`. They were armed by a socket probe at import, so `uv run pytest` mutated whatever Isaac Sim happened to be running.
+
+### Fixed
+- **Two robots corrupted PhysX's GPU pipeline** — CUDA error 700, garbage joint values, and dead physics still reported as success. Physics is now initialised before any articulation exists.
+- **The physics view went stale and nothing rebuilt it** — 0 DOF from the second robot of a session onward, joint commands evaporated, and reads echoed the caller's own command back as a measurement.
+- **`import_urdf` reported success while importing nothing.**
+- **Eight tools reported success for input that did nothing** — a typo'd prim path, a wrong-length array or an unknown `object_type` read as a completed operation. `create_object` also rejects `size <= 0`, which authored a prim scaled to nothing.
+- **`capture_image` on a path with no camera created one**, plus a render product and an SDG graph, then reported "no frame available yet".
+- **`step_simulation` accepted a negative frame count** and answered "Stepped -5 frames" without advancing physics.
+- **Joint limits were reported in degrees while positions were radians** — clamping to them commanded 25 revolutions.
+- **A requested rotation compounded with the prim's existing orientation**, so cameras could not be aimed at all.
+- **Environments lost their axis and unit conversion** — a ground standing on edge, 10 km across; 6 of 25 shipped environments on 5.1.
+- **`clear_scene` did not clear a loaded environment**, so the next `create_physics_scene` stacked a second ground.
+- **Both lidar tools were dead on 5.1**, and the empty-read message gave the wrong advice two times out of three. Reviving them surfaced a second trap that is now refused up front: a lidar re-created on a path that previously held one binds to the `Camera` prim the old sensor left behind and never returns a point.
+- **Cameras could not be deleted** — the sensor wrapper re-created the prim a tick later.
+- **Commands sent during startup failed with a raw `AttributeError`** — the socket opens seconds before Kit has a stage.
+- **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree.
+- **`pip install isaacsim-mcp-server` produced a package that could not start** — the `mcp` dependency was unbounded, so a fresh install resolved mcp 2.x, where `FastMCP` was renamed and `mcp.server.fastmcp` no longer exists. This affects 0.5.2 on PyPI today, not only this release.
+- **`create_object(color=...)` was accepted and discarded** — the parameter was documented and sent, no prim was ever coloured, and the call reported success.
+- **`search_usd` dropped `position` and `scale`** — the asset landed at the origin at native scale, reported as success.
+- **`set_joint_positions` reported the same success whether or not the robot took the command** — when the articulation refuses it, the values are written to USD drive targets, which move nothing until physics initialises again. The response now carries `command_source` and warns on the fallback.
+- **Every validation error was reported as a connection failure** — a typo'd prim path or a bad size came back as "Communication error with Isaac", which reads as a transport fault, and the healthy socket was thrown away and redialled on the next call.
+- **`reload_script(module_name=...)` re-ran stale bytecode** — editing a controller and reloading it reported success while the previous version kept running, whenever the edit left the file the same length.
+- **`list_prims` returned only immediate children** while documenting "all prims in the scene", so a camera parented under a robot was invisible to a listing that reported success.
+- **`edit_action_graph` rejected the relative attribute paths its own docstring documents** — every attribute except `usePath`/`scriptPath` failed with `node=None, graph=None`.
 
 ### Notes
-- 5.1.0 behavior unchanged — `IsaacAdapterV5` is untouched.
-- Hot-reload script (`scripts/dev_mcp_server.sh`) now reloads `adapters.v6` alongside `adapters.v5`.
+- Verified on device on Isaac Sim 5.1.0, 6.0.1 PhysX and 6.0.1 Newton, cold-booted one instance at a time with the GUI.
+- Only one Isaac Sim instance can run at a time on a single GPU; a second concurrent instance caused device-lost crashes during testing.
 
 ## [0.5.2] - 2026-04-07
 

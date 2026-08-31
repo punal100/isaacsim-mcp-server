@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, Sequence
 
 from isaac_sim_mcp_extension.gen3d import Beaver3d
@@ -49,10 +50,20 @@ def import_urdf(
     try:
         if not urdf_path:
             return {"status": "error", "message": "urdf_path is required"}
-        _result = adapter.import_urdf(urdf_path, prim_path=prim_path)
+        result = adapter.import_urdf(urdf_path, prim_path=prim_path)
+        # Report where the robot actually landed. The importer picks its own
+        # prim name and the adapter may not be able to move it, so echoing the
+        # requested path made a failed import look like a successful one.
+        actual = result if isinstance(result, str) and result else prim_path
+        if not adapter.get_stage().GetPrimAtPath(actual):
+            return {"status": "error", "message": f"URDF import produced no prim on the stage for {urdf_path}"}
         if position:
-            adapter.set_prim_transform(prim_path, position=position)
-        return {"status": "success", "message": f"Imported URDF from {urdf_path}", "prim_path": prim_path}
+            adapter.set_prim_transform(actual, position=position)
+        response = {"status": "success", "message": f"Imported URDF from {urdf_path}", "prim_path": actual}
+        if actual != prim_path:
+            response["requested_prim_path"] = prim_path
+            response["message"] += f" (imported at {actual}, not the requested {prim_path})"
+        return response
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -67,9 +78,20 @@ def load_usd(
     try:
         if not usd_url:
             return {"status": "error", "message": "usd_url is required"}
+        # A local path that does not exist produced a reference to nothing and
+        # still reported "Loaded USD from ...". Check before, and verify after.
+        if "://" not in usd_url and not os.path.isfile(usd_url):
+            return {"status": "error", "message": f"USD file not found: {usd_url}"}
         loader = USDLoader()
         result_path = loader.load_usd_from_url(url_path=usd_url, target_path=prim_path, location=position, scale=scale)
-        return {"status": "success", "message": f"Loaded USD from {usd_url}", "prim_path": result_path}
+        landed = result_path or prim_path
+        try:
+            prim = adapter.get_stage().GetPrimAtPath(landed)
+            if not (prim and prim.IsValid()):
+                return {"status": "error", "message": f"Loading {usd_url} produced no prim at {landed}"}
+        except Exception:
+            pass
+        return {"status": "success", "message": f"Loaded USD from {usd_url}", "prim_path": landed}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -87,7 +109,10 @@ def search_usd(
         searcher = USDSearch3d()
         url = searcher.search(text_prompt)
         loader = USDLoader()
-        prim_path = loader.load_usd_from_url(url_path=url, target_path=target_path)
+        # location/scale were dropped here while load_usd right above passes
+        # them, so a searched asset landed at the origin at native scale and
+        # reported success.
+        prim_path = loader.load_usd_from_url(url_path=url, target_path=target_path, location=position, scale=scale)
         return {
             "status": "success",
             "message": f"Found and loaded USD for '{text_prompt}'",

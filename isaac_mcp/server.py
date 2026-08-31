@@ -113,6 +113,13 @@ get_joint_config, get_isaac_logs, create_action_graph, edit_action_graph.
   writes take effect; such write failures are SILENT (not raised). Follow the
   WARMUP pattern (skip ~30 frames, then World.initialize_physics() +
   robot.initialize()).
+
+### Physics engine (Isaac Sim 6.0)
+get_simulation_state reports `engine` on 6.0; absent on 5.1, which is PhysX.
+On "newton" (beta): joint drives do not converge and joint limits are not
+enforced — run motion work on PhysX (isaac-sim.sh). Never author a joint via
+execute_script unless an ancestor has UsdPhysics.ArticulationRootAPI: it aborts
+physics for the whole session and only restarting Isaac Sim recovers it.
 """
 
 mcp = FastMCP(

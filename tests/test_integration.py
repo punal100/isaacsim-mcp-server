@@ -68,9 +68,23 @@ def _isaac_reachable() -> bool:
         return False
 
 
+# These tests MUTATE a running simulator: they clear the scene, delete prims,
+# play and stop the timeline, and create cameras — one of which permanently
+# consumes the 6.0 session's undeletable-first-camera slot (#20).
+#
+# Reachability alone used to arm them, evaluated at import, so `uv run pytest`
+# hit whatever Kit happened to be running. That has produced false bug reports
+# in this repository more than once: a sweep measured a stage the unit suite had
+# quietly rewritten underneath it. Requiring an explicit opt-in makes running
+# them a decision rather than an accident.
+_OPT_IN = os.environ.get("ISAAC_MCP_LIVE_TESTS") == "1"
+
 requires_isaac = pytest.mark.skipif(
-    not _isaac_reachable(),
-    reason="Isaac Sim not running on localhost:8766",
+    not (_OPT_IN and _isaac_reachable()),
+    reason=(
+        "live tests are opt-in: set ISAAC_MCP_LIVE_TESTS=1 with Isaac Sim running "
+        "on localhost:8766. They mutate the running scene."
+    ),
 )
 
 
@@ -371,8 +385,10 @@ class TestRobotTools:
             },
         )
         resp = send(conn, "robots.get_info", {"prim_path": "/InfoFranka"})
-        # May need physics initialized to get full info
-        assert resp["status"] in ("success", "error")
+        assert resp["status"] == "success", f"Failed: {resp}"
+        info = resp["result"]
+        assert info.get("num_dof", 0) > 0, f"robot reported no joints: {info}"
+        assert info.get("joint_names"), f"robot reported no joint names: {info}"
 
 
 # ── Material Tools ────────────────────────────────────────
@@ -471,8 +487,13 @@ class TestSensorTools:
                 "prim_path": "/World/CapCamera",
             },
         )
-        # Capture may require simulation to be running; accept both success and error
-        assert resp["status"] in ("success", "error")
+        # RTX capture legitimately needs a rendered frame, so an empty read is a
+        # valid outcome here — but only that one. Accepting any error at all let
+        # this stay green through unrelated breakage.
+        if resp["status"] == "error":
+            assert "frame" in resp["message"].lower(), f"unexpected capture failure: {resp}"
+        else:
+            assert resp["result"].get("output_path") or resp["result"].get("message")
 
     def test_create_lidar(self, conn: IsaacConnection) -> None:
         resp = send(
@@ -483,8 +504,11 @@ class TestSensorTools:
                 "position": [0.0, 0.0, 2.0],
             },
         )
-        # Lidar creation may vary by Isaac Sim config
-        assert resp["status"] in ("success", "error")
+        # This assertion used to accept either outcome, and stayed green through
+        # an entire period when both lidar tools raised on every call on 5.1.
+        # Creating a lidar on a free path works on every supported runtime.
+        assert resp["status"] == "success", f"Failed: {resp}"
+        assert resp["result"]["prim_path"] == "/World/TestLidar"
 
 
 # ── Asset Tools ───────────────────────────────────────────
@@ -520,6 +544,24 @@ class TestAssetTools:
 
 @requires_isaac
 class TestSimulationTools:
+    @pytest.fixture(autouse=True, scope="class")
+    def clean_stage(self, conn: IsaacConnection) -> None:
+        """Step/play on a stage this class controls, not on earlier tests' debris.
+
+        The object tests leave a Cone behind, and Newton genuinely cannot
+        simulate a cone alongside an articulation (its MuJoCo solver has no cone
+        shape), so the adapter refuses to initialise physics. That refusal is
+        correct — these tests just have no business inheriting the leftovers.
+        """
+        send(conn, "simulation.stop")
+        send(conn, "scene.clear")
+        # `floor` was never a parameter — the handler always creates the ground
+        # plane — so this call used to fail with an unexpected-keyword TypeError
+        # and go unchecked, leaving the class running without the physics scene
+        # it believed it had set up.
+        resp = send(conn, "scene.create_physics")
+        assert resp["status"] == "success", f"physics scene not created: {resp}"
+
     def test_play(self, conn: IsaacConnection) -> None:
         resp = send(conn, "simulation.play")
         assert resp["status"] == "success", f"Failed: {resp}"
@@ -559,8 +601,10 @@ class TestSimulationTools:
                 "code": "raise ValueError('test error')",
             },
         )
-        # Script errors should be caught and returned
-        assert resp["status"] in ("success", "error")
+        # The point of this test is that a raising script is reported as an
+        # error rather than swallowed; accepting success defeated it entirely.
+        assert resp["status"] == "error", f"a raising script reported success: {resp}"
+        assert "test error" in resp["message"], f"the script's own message was lost: {resp}"
 
     def test_execute_script_missing_code(self, conn: IsaacConnection) -> None:
         resp = send(conn, "simulation.execute_script", {})

@@ -57,9 +57,11 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         0.4 m. Use `scale` only for deliberate non-uniform shaping; otherwise
         use `size`. If both are given, `scale` wins and `size` is ignored.
 
-        Returns prim_path, actual_size [x, y, z] in meters, and bounding_box
+        For the geometric prims (Cube, Sphere, Cylinder, Cone, Capsule) this
+        returns prim_path, actual_size [x, y, z] in meters, and bounding_box
         (min/max corners in world coordinates) so you can accurately place
-        other objects relative to this one.
+        other objects relative to this one. A Plane has no such extent and
+        returns prim_path only.
 
         Args:
             object_type: Type of primitive — Cube, Sphere, Cylinder, Cone, Capsule, or Plane

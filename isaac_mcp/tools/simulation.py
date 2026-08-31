@@ -177,7 +177,10 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
     def get_physics_state(prim_path: str) -> str:
         """Diagnostic tool: get physics state for a prim.
 
-        Returns rigid body status, mass, velocities, kinematic flag, and collision info.
+        Returns rigid body status, velocities, kinematic flag, and collision info.
+        `mass` is included only when the prim carries a UsdPhysics MassAPI —
+        objects created by create_object do not, and take their mass from the
+        collider's density.
         Velocity units: linear_velocity in m/s, angular_velocity in rad/s.
         Velocities are only non-zero once the simulation has advanced — step the
         simulation (or play) before reading them.
@@ -253,7 +256,11 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("reload_script")
-    def reload_script(file_path: str, module_name: Optional[str] = None) -> str:
+    def reload_script(
+        file_path: Optional[str] = None,
+        module_name: Optional[str] = None,
+        script_file: Optional[str] = None,
+    ) -> str:
         """Reload a Python controller from a file on disk.
 
         Two modes, chosen automatically:
@@ -274,11 +281,18 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
 
         Args:
             file_path: Path to the Python file on disk.
+            script_file: Alias for file_path. create_action_graph names this
+                argument script_file, and an unknown argument is dropped
+                silently rather than rejected, so both spellings are accepted
+                here instead of one of them quietly doing nothing.
             module_name: Optional module name to reload (e.g. 'my_controller').
         """
         try:
+            path = file_path or script_file
+            if not path:
+                return json.dumps({"status": "error", "message": "file_path (or script_file) is required"})
             conn = get_connection()
-            params = {"file_path": file_path}
+            params = {"file_path": path}
             if module_name is not None:
                 params["module_name"] = module_name
             result = conn.send_command("simulation.reload_script", params)

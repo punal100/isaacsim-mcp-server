@@ -24,7 +24,7 @@
 """Sensor MCP tools."""
 
 import json
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -40,14 +40,23 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
         position: Optional[List[float]] = None,
         rotation: Optional[List[float]] = None,
         resolution: Optional[List[int]] = None,
+        target: Optional[List[float]] = None,
     ) -> str:
         """Add a camera sensor to the scene.
+
+        Prefer target= over rotation= for aiming: cameras look down their local
+        -Z and carry a built-in orientation, so hand-computed euler angles are
+        easy to get wrong and give you a picture of the sky. The response echoes
+        the rotation that was applied under "rotation" and the point under
+        "aimed_at".
 
         Args:
             prim_path: Prim path for the camera.
             position: [x, y, z] world position.
-            rotation: [rx, ry, rz] rotation in degrees.
+            rotation: [rx, ry, rz] rotation in degrees. Ignored if target is given.
             resolution: [width, height] image resolution. Default 1280x720.
+            target: [x, y, z] world point to look at, using +Z as up. Needs a
+                position — either passed here or already on the prim.
         """
         try:
             conn = get_connection()
@@ -56,6 +65,8 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
                 params["position"] = position
             if rotation:
                 params["rotation"] = rotation
+            if target:
+                params["target"] = target
             if resolution:
                 params["resolution"] = resolution
             result = conn.send_command("sensors.create_camera", params)
@@ -111,15 +122,36 @@ def register_tools(mcp: FastMCP, get_connection: "Callable[[], IsaacConnection]"
             return json.dumps({"status": "error", "message": str(e)})
 
     @mcp.tool("get_lidar_point_cloud")
-    def get_lidar_point_cloud(prim_path: str = "/World/Lidar") -> str:
+    def get_lidar_point_cloud(
+        prim_path: str = "/World/Lidar",
+        max_points: Optional[int] = None,
+        output_path: Optional[str] = None,
+    ) -> str:
         """Get point cloud data from a lidar sensor.
+
+        Requires the timeline to be playing — RTX lidar data is produced by
+        Replicator while the sim runs, and a sweep only completes on some
+        frames, so an empty read means "not this frame", not "saw nothing".
+
+        By default returns a summary rather than the raw cloud: point_count,
+        bounds, and the nearest hit. A full sweep is tens of thousands of points
+        and megabytes of JSON, which is rarely what you want in a response.
 
         Args:
             prim_path: Prim path of the lidar sensor.
+            max_points: Include this many points in the response, sampled at an
+                even stride across the sweep. Omit for summary only.
+            output_path: Write the complete cloud to this .npy file and return
+                its path; numpy.load() reads it back as an (N, 3) array.
         """
         try:
             conn = get_connection()
-            result = conn.send_command("sensors.get_point_cloud", {"prim_path": prim_path})
+            params: Dict[str, Any] = {"prim_path": prim_path}
+            if max_points is not None:
+                params["max_points"] = max_points
+            if output_path:
+                params["output_path"] = output_path
+            result = conn.send_command("sensors.get_point_cloud", params)
             return json.dumps(result, indent=2)
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)})

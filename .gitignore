@@ -86,4 +86,9 @@ mcp_cache/
 
 # Code agents configurations
 .claude
+.superpowers
 .mcp.json
+
+# mcp-publisher binary, downloaded ad hoc for a manual registry publish
+# (the release workflow fetches its own copy into the runner workspace)
+mcp-publisher

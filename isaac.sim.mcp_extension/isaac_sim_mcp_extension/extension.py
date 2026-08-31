@@ -154,10 +154,19 @@ class MCPExtension(omni.ext.IExt):
                 if result and result.get("status") == "success":
                     return {"status": "success", "result": result}
                 else:
-                    return {
-                        "status": "error",
-                        "message": result.get("message", "Unknown error") if result else "No result",
-                    }
+                    if not result:
+                        return {"status": "error", "message": "No result"}
+                    # Forward whatever else the handler attached, not just the
+                    # message. An error that carries the next step is what lets
+                    # a caller recover on its own: create_lidar refuses a
+                    # poisoned prim path and offers `suggested_prim_path`, and
+                    # dropping it here meant the client saw None and had to
+                    # invent a path from prose. Handler tests call the function
+                    # directly and cannot catch this — it only shows on a round
+                    # trip through the extension.
+                    error = {"status": "error", "message": result.get("message", "Unknown error")}
+                    error.update({k: v for k, v in result.items() if k not in ("status", "message")})
+                    return error
             except Exception as e:
                 traceback.print_exc()
                 return {"status": "error", "message": str(e)}

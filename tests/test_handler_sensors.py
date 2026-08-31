@@ -291,6 +291,316 @@ def test_v6_lidar_decodes_the_generic_model_output_buffer(monkeypatch):
 
     pc = adapter.get_lidar_point_cloud("/World/Lidar")
 
+    # numElements decides the row count, not the byte length of the buffer.
     assert pc.shape == (3, 3), pc
-    assert pc[0].tolist() == [1.0, 4.0, 7.0]
-    assert pc[2].tolist() == [3.0, 6.0, 9.0]
+
+    # The shipped rotary configs declare elementsCoordsType = SPHERICAL, so the
+    # decoded x/y/z are azimuth degrees, elevation degrees and range metres and
+    # must come back as Cartesian metres (issue #22). Range is the invariant
+    # that survives the conversion: each point sits its own range from the
+    # sensor origin.
+    import math
+
+    for row, expected_range in zip(pc.tolist(), [7.0, 8.0, 9.0]):
+        assert math.isclose(math.dist([0.0, 0.0, 0.0], row), expected_range, rel_tol=1e-6), row
+
+    # First element: azimuth 1 deg, elevation 4 deg, range 7 m.
+    horizontal = 7.0 * math.cos(math.radians(4.0))
+    assert math.isclose(pc[0].tolist()[0], horizontal * math.cos(math.radians(1.0)), rel_tol=1e-6)
+    assert math.isclose(pc[0].tolist()[2], 7.0 * math.sin(math.radians(4.0)), rel_tol=1e-6)
+
+
+# ── first-RTX-camera warning (issue #29) ─────────────────────────────────────
+
+
+class _V6CameraAdapter:
+    """V6-shaped adapter: strands its first camera, caches them, releases on stop.
+
+    Mirrors the real thing closely enough to reproduce #29: V6 subscribes to the
+    timeline STOP event and calls release_all_sensors(), which empties
+    _camera_sensors. That release is deliberate — it is what makes a camera
+    deletable — so the warning must not read that cache to decide whether a
+    camera has ever been created.
+    """
+
+    def strands_first_rtx_camera(self):
+        return True
+
+    def note_first_rtx_camera(self, prim_path):
+        if not self.strands_first_rtx_camera():
+            return False
+        if getattr(self, "_first_rtx_camera_path", None) is not None:
+            return False
+        self._first_rtx_camera_path = prim_path
+        return True
+
+    def __init__(self):
+        self._camera_sensors = {}
+
+    def create_camera(self, prim_path, resolution=(1280, 720), **kwargs):
+        self._camera_sensors[prim_path] = object()
+        return self._camera_sensors[prim_path]
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+    def release_all_sensors(self):
+        """What the timeline STOP handler does."""
+        self._camera_sensors.clear()
+
+
+def test_first_camera_warning_fires_on_the_first_camera():
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    first = create_camera(adapter, prim_path="/World/A1")
+
+    assert "warning" in first, "the session's first RTX camera must be flagged"
+    assert "/World/A1" in first["warning"]
+
+
+def test_second_camera_is_not_flagged():
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    create_camera(adapter, prim_path="/World/A1")
+    second = create_camera(adapter, prim_path="/World/A2")
+
+    assert "warning" not in second
+
+
+def test_a_stop_cycle_does_not_re_arm_the_first_camera_warning():
+    """Measured on 6.0.1 PhysX: play -> stop -> create_camera warned again.
+
+    Only one camera per Kit session is actually stranded (#20), so a second
+    warning names the wrong prim and inverts that issue's documented workaround
+    — the user keeps the newly named camera as the throwaway while the real
+    survivor is the first one.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    adapter = _V6CameraAdapter()
+    create_camera(adapter, prim_path="/World/A1")
+
+    adapter.release_all_sensors()  # the timeline STOP handler
+
+    after_stop = create_camera(adapter, prim_path="/World/A3")
+
+    assert "warning" not in after_stop, (
+        "a play/stop cycle re-armed the warning; it named /World/A3 while /World/A1 is the camera actually stranded"
+    )
+
+
+def test_v5_never_gets_the_warning():
+    """5.1 removes every camera, so the warning would be false there."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_camera
+
+    class _V5Adapter(_V6CameraAdapter):
+        def strands_first_rtx_camera(self):
+            return False
+
+    result = create_camera(_V5Adapter(), prim_path="/World/A1")
+    assert "warning" not in result
+
+
+# ── creating a lidar on a poisoned path (issues #25, #31) ────────────────────
+
+
+class _StageWithPrim:
+    def __init__(self, path, type_name):
+        self._path, self._type = path, type_name
+
+    def GetPrimAtPath(self, path):
+        return _LivePrim(self._type) if path == self._path else _GonePrim()
+
+
+class _LivePrim:
+    def __init__(self, t):
+        self._t = t
+
+    def IsValid(self):
+        return True
+
+    def GetTypeName(self):
+        return self._t
+
+
+class _GonePrim:
+    def IsValid(self):
+        return False
+
+    def GetTypeName(self):
+        return ""
+
+
+class _LidarCreateAdapter:
+    def __init__(self, existing_type=None, path="/World/L"):
+        self.stage = _StageWithPrim(path, existing_type) if existing_type else _StageWithPrim("", "")
+        self.created = []
+
+    def get_stage(self):
+        return self.stage
+
+    def create_lidar(self, prim_path, config=None, **kw):
+        self.created.append(prim_path)
+        return object()
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+
+def test_creating_a_lidar_on_a_resurrected_camera_prim_is_refused():
+    """Measured on 5.1.0: a deleted lidar's prim comes back typed Camera (#25).
+
+    Creating a lidar there binds LidarRtx to a Camera prim and the sensor never
+    produces a single point — 0 of 15 reads, repeatedly, while fresh paths in
+    the same session read 33-40%. The tool reported success for that dead
+    sensor, so the caller retried an empty read forever.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter(existing_type="Camera", path="/World/L")
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "error", "a poisoned path must not report success"
+    assert "Camera" in result["message"]
+    assert adapter.created == [], "the dead sensor should not have been built"
+
+
+def test_creating_a_lidar_on_a_free_path_still_works():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter()
+    result = create_lidar(adapter, prim_path="/World/Fresh")
+
+    assert result["status"] == "success"
+    assert adapter.created == ["/World/Fresh"]
+
+
+def test_recreating_a_lidar_on_an_existing_lidar_is_allowed():
+    """Re-creating over a live OmniLidar is the normal cached-sensor path."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarCreateAdapter(existing_type="OmniLidar", path="/World/L")
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "success"
+
+
+class _StageWithPaths:
+    """Stage where a set of paths exist, everything else is free."""
+
+    def __init__(self, taken):
+        self.taken = dict(taken)  # path -> type name
+
+    def GetPrimAtPath(self, path):
+        t = self.taken.get(path)
+        return _LivePrim(t) if t else _GonePrim()
+
+
+class _SuggestAdapter:
+    def __init__(self, taken):
+        self.stage = _StageWithPaths(taken)
+        self.created = []
+
+    def get_stage(self):
+        return self.stage
+
+    def create_lidar(self, prim_path, config=None, **kw):
+        self.created.append(prim_path)
+        return object()
+
+    def set_prim_transform(self, prim_path, position=None, rotation=None):
+        return True
+
+
+def test_refusal_names_a_concrete_free_path():
+    """An agent should be able to act on the error without inventing a name.
+
+    "use a different prim path" makes the caller guess, and an agent mid-task
+    may simply retry the same one. Hand it a path that is known to be free.
+    """
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _SuggestAdapter({"/World/L": "Camera"})
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "error"
+    assert "suggested_prim_path" in result, "the refusal must offer a usable path"
+    assert result["suggested_prim_path"] != "/World/L"
+    assert result["suggested_prim_path"] in result["message"], "and name it in the message"
+
+
+def test_suggested_path_skips_paths_that_are_also_taken():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _SuggestAdapter(
+        {
+            "/World/L": "Camera",
+            "/World/L_2": "Camera",
+            "/World/L_3": "OmniLidar",
+        }
+    )
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["suggested_prim_path"] == "/World/L_4"
+
+
+# ── a lidar created while the timeline plays never binds (issue #31) ─────────
+
+
+class _LidarTimelineAdapter:
+    """Records the create; reports whatever timeline state it is given."""
+
+    SUPPORTS_LIDAR_CONFIG = True
+
+    def __init__(self, timeline_state, supports_config=True):
+        self._timeline_state = timeline_state
+        self.SUPPORTS_LIDAR_CONFIG = supports_config
+        self.created = []
+
+    def get_simulation_state(self):
+        return {"timeline_state": self._timeline_state}
+
+    def create_lidar(self, prim_path, config=None):
+        self.created.append((prim_path, config))
+
+    def get_stage(self):
+        return None
+
+
+def test_lidar_created_while_playing_is_flagged():
+    """#31: the annotators only bind when the sensor is created on a stopped
+    timeline. Created mid-play it never fills, and the tool's own advice is to
+    retry an empty read — which never succeeds."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarTimelineAdapter("playing")
+
+    result = create_lidar(adapter, prim_path="/World/L")
+
+    assert result["status"] == "success"
+    assert adapter.created, "the lidar should still be created"
+    assert "warning" in result
+    assert "stop" in result["warning"].lower()
+
+
+def test_lidar_created_while_stopped_is_not_flagged():
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    result = create_lidar(_LidarTimelineAdapter("stopped"), prim_path="/World/L")
+
+    assert result["status"] == "success"
+    assert "warning" not in result
+
+
+def test_both_lidar_warnings_survive_together():
+    """A dropped config and a playing timeline are independent problems."""
+    from isaac_sim_mcp_extension.handlers.sensors import create_lidar
+
+    adapter = _LidarTimelineAdapter("playing", supports_config=False)
+
+    result = create_lidar(adapter, prim_path="/World/L", config="Example_Rotary")
+
+    assert "Example_Rotary" in result["warning"], "the dropped config warning was lost"
+    assert "stop" in result["warning"].lower(), "the timeline warning was lost"

@@ -22,3 +22,12 @@ jobs:
 
       - name: Format check
         run: ruff format --check .
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Unit tests
+        # Live tests that mutate a running simulator are opt-in via
+        # ISAAC_MCP_LIVE_TESTS and stay skipped here; these are the contract
+        # tests, and nothing should publish without them.
+        run: pytest -q

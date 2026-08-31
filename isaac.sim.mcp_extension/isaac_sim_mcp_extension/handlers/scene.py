@@ -80,6 +80,39 @@ def create_physics(
         gp = stage.GetPrimAtPath(floor_path)
         if gp.IsValid() and not gp.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI.Apply(gp)
+
+        # Bring physics up NOW, while the stage still holds no articulation.
+        #
+        # PhysX corrupts its GPU pipeline if the simulation is first set up
+        # with an articulation already on the stage and another is added
+        # afterwards: the next start dies with "PhysX Internal CUDA error.
+        # Simulation cannot continue! Error code 700", followed by one
+        # "PhysX ABORT ... because of previous CUDA errors" per stepped frame.
+        # The simulator keeps answering and step_simulation still reports
+        # success, but physics is dead — a dropped sphere stays at its spawn
+        # height and joint reads come back as garbage (-431602080.0 measured
+        # on 6.0.1).
+        #
+        # Nothing else set up physics before the first robot, because
+        # _ensure_physics_world is reached from create_robot's joint report —
+        # i.e. one reference too late. Measured on 6.0.1-rc.7, cold-booted per
+        # trial, two FR3s through the tools: initialise before either robot and
+        # 150 steps run clean; initialise after the first and the second robot
+        # brings 149 aborts. Stock Isaac Sim with the same two robots is clean
+        # either way, and one robot alone never trips it, which is why every
+        # single-robot flow missed this.
+        #
+        # PhysX only. Newton has no such fault (0 CUDA errors in every trial),
+        # and priming it here actively breaks it: Newton builds its model when
+        # physics comes up, so a model built on the empty scene left a
+        # rigid-body-only stage frozen — a sphere dropped from z=2 stayed at
+        # 2.000 where it had landed at 0.149, even though step reported the
+        # rebuild. Scenes containing a robot were unaffected, which is exactly
+        # the kind of partial break that ships unnoticed.
+        # NOTE: an engine that cannot be identified ("unknown") primes, as
+        # it always has -- V6 answers "unknown" whenever detection fails.
+        if adapter.engine != adapter.ENGINE_NEWTON:
+            adapter._ensure_physics_world()
         return {"status": "success", "message": f"Physics scene created at {scene_path}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -95,24 +128,42 @@ def _clear_environment_contents(adapter: IsaacAdapterBase, stage) -> list:
     env = stage.GetPrimAtPath("/Environment")
     if not env or not env.IsValid():
         return []
-    removed = []
-    for child in list(env.GetChildren()):
-        if child.GetName() == "defaultLight":
-            continue
-        path = str(child.GetPath())
+    # Snapshot paths, not prim handles. Deleting one child expires the handles
+    # held for the others, and touching an expired one raises
+    # "Accessed invalid expired 'Xform' prim" -- which aborted the whole clear,
+    # so clear_scene failed outright on a stage that had an environment loaded.
+    child_paths = []
+    for child in env.GetChildren():
         try:
-            child.GetReferences().ClearReferences()
+            if child.GetName() != "defaultLight":
+                child_paths.append(str(child.GetPath()))
         except Exception:
-            pass
-        adapter.delete_prim(path)
-        removed.append(child.GetName())
+            continue
+    removed = []
+    for path in child_paths:
+        name = path.rsplit("/", 1)[-1]
+        try:
+            child = stage.GetPrimAtPath(path)
+            if not child or not child.IsValid():
+                continue
+            try:
+                child.GetReferences().ClearReferences()
+            except Exception:
+                pass
+            adapter.delete_prim(path)
+            removed.append(name)
+        except Exception:
+            # One stubborn child must not abort the rest of the clear.
+            continue
     # Older callers referenced straight onto /Environment; undo that too, along
     # with any axis/unit reconciliation transform authored for it.
     try:
         from pxr import UsdGeom
 
-        env.GetReferences().ClearReferences()
-        UsdGeom.Xformable(env).ClearXformOpOrder()
+        env = stage.GetPrimAtPath("/Environment")
+        if env and env.IsValid():
+            env.GetReferences().ClearReferences()
+            UsdGeom.Xformable(env).ClearXformOpOrder()
     except Exception:
         pass
     return removed
@@ -134,8 +185,24 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environmen
         # defaultLight, and a stage with no light renders black -- which reads
         # as a broken sensor rather than a missing lamp. Its *contents* are a
         # different matter: a loaded environment used to survive clear_scene
-        # entirely, so a later create_physics_scene(floor=True) stacked a second
+        # entirely, so a later create_physics_scene stacked a second
         # ground under the first and "clear" left a 100 m world in place.
+        # Sensors first: an initialized camera or lidar keeps its prim alive, so
+        # clearing without releasing them left every camera ever created on the
+        # stage, still rendering.
+        # Delete each sensor prim by its own path rather than relying on the
+        # root sweep below: deleting the *parent* does not release a camera the
+        # way deleting the camera path does, so a bulk clear left cameras behind
+        # for three passes while their render products kept rendering.
+        # delete_prim releases the wrapper first, which is the sequence proven
+        # to make the deletion stick.
+        try:
+            for cache_name in ("_camera_sensors", "_lidar_sensors"):
+                for sensor_path in list(getattr(adapter, cache_name, {}) or {}):
+                    adapter.delete_prim(sensor_path)
+            adapter.release_all_sensors()
+        except Exception:
+            pass
         removed_environment = _clear_environment_contents(adapter, stage) if not keep_environment else []
         # Clear all root-level prims (robots created at root, etc.)
         root_prim = stage.GetPseudoRoot()
@@ -172,10 +239,19 @@ def clear(adapter: IsaacAdapterBase, keep_physics: bool = False, keep_environmen
         return {"status": "error", "message": str(e)}
 
 
-def list_prims(adapter: IsaacAdapterBase, root_path: str = "/", prim_type: Optional[str] = None) -> Dict[str, Any]:
+def list_prims(
+    adapter: IsaacAdapterBase,
+    root_path: str = "/",
+    prim_type: Optional[str] = None,
+    recursive: bool = False,
+) -> Dict[str, Any]:
     try:
-        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type)
-        return {"status": "success", "prims": prims}
+        prims = adapter.list_prims(root_path=root_path, prim_type=prim_type, recursive=recursive)
+        # Say which of the two listings this was. The shallow default reads as a
+        # complete answer otherwise: during the 0.6.0 sweep "/World present"
+        # after a clear_scene was taken for an empty scene while a lidar was
+        # still parented under it.
+        return {"status": "success", "prims": prims, "recursive": recursive}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -373,6 +449,15 @@ def load_environment(
             result["corrections"] = corrections
         if bounds:
             result["bounds"] = bounds
+        else:
+            # bounds carry floor_height, which is what lets a caller place
+            # objects on the ground. Omitting them silently left the caller to
+            # guess z on a stage whose scale it has not seen.
+            result["warning"] = (
+                "Could not compute bounds for this environment, so extent and floor_height are "
+                "missing from this response. Query a specific prim with get_prim_info before "
+                "placing objects, rather than assuming the ground is at z=0."
+            )
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

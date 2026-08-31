@@ -101,3 +101,106 @@ def test_v5_warns_when_usd_writeback_disabled():
     code = _func_src("get_physics_state")
     assert "updateVelocitiesToUsd" in code
     assert "velocity_warning" in code
+
+
+def _v6_adapter_with_view(monkeypatch, view):
+    """A V6 adapter whose physics simulation view is `view` (None = unavailable)."""
+    import importlib
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {
+                    "get_active_physics_engine": classmethod(lambda cls: "physx"),
+                    "get_physics_simulation_view": classmethod(lambda cls: view),
+                },
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "isaacsim.core.version", types.SimpleNamespace(get_version=lambda: "6.0.0"))
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+
+    from pxr import UsdPhysics
+
+    class _RigidBodyAPI:
+        def __init__(self, prim):
+            pass
+
+        def GetKinematicEnabledAttr(self):
+            return types.SimpleNamespace(Get=lambda: False)
+
+    monkeypatch.setattr(UsdPhysics, "RigidBodyAPI", _RigidBodyAPI, raising=False)
+    monkeypatch.setattr(UsdPhysics, "MassAPI", type("MassAPI", (), {}), raising=False)
+    monkeypatch.setattr(UsdPhysics, "CollisionAPI", type("CollisionAPI", (), {}), raising=False)
+
+    class _Prim:
+        def IsValid(self):
+            return True
+
+        def HasAPI(self, schema):
+            return schema is UsdPhysics.RigidBodyAPI
+
+    adapter = v6_mod.IsaacAdapterV6()
+    monkeypatch.setattr(adapter, "get_stage", lambda: types.SimpleNamespace(GetPrimAtPath=lambda p: _Prim()))
+    return adapter
+
+
+def test_v6_says_when_velocity_could_not_be_measured(monkeypatch):
+    """Zeros from an unavailable view must not be reported as a body at rest.
+
+    V5 sets velocity_warning when PhysX write-back is off rather than reporting
+    a moving body as stationary. V6 pre-seeded [0,0,0] and swallowed every
+    failure, so "no physics view", "view invalidated" and "genuinely at rest"
+    were indistinguishable -- the same silent wrong answer, without the warning.
+    """
+    adapter = _v6_adapter_with_view(monkeypatch, None)
+
+    result = adapter.get_physics_state("/World/Cube")
+
+    assert result["linear_velocity"] == [0.0, 0.0, 0.0]
+    assert "velocity_warning" in result, "an unmeasured velocity was reported as a measurement"
+
+
+def test_v6_does_not_warn_when_the_view_answered(monkeypatch):
+    """The warning must be scoped to failures, not blanket every read."""
+
+    class _Array:
+        """Enough of an ndarray for the read: .size and .reshape(-1)."""
+
+        def __init__(self, flat):
+            self._flat = flat
+
+        @property
+        def size(self):
+            return len(self._flat)
+
+        def reshape(self, _shape):
+            return self._flat
+
+    class _Velocities:
+        def numpy(self):
+            return _Array([1.0, 2.0, 3.0, 0.4, 0.5, 0.6])
+
+    class _RbView:
+        def get_velocities(self):
+            return _Velocities()
+
+    class _View:
+        def create_rigid_body_view(self, paths):
+            return _RbView()
+
+    adapter = _v6_adapter_with_view(monkeypatch, _View())
+
+    result = adapter.get_physics_state("/World/Cube")
+
+    assert result["linear_velocity"] == [1.0, 2.0, 3.0]
+    assert "velocity_warning" not in result, "a successful measurement must not carry a warning"

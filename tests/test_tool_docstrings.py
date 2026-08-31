@@ -120,3 +120,36 @@ def test_server_instructions_cover_contracts():
     assert "[PRINT]" in src  # log capture (#5)
     assert "silently" in src.lower()  # execute_script (#6)
     assert "silent" in src.lower()  # ScriptNode write failures
+
+
+def test_server_instructions_warn_about_the_newton_engine():
+    """Newton is beta and has two faults the agent cannot detect from a response.
+
+    Drives do not converge (#21), and a joint with no articulation root aborts
+    Newton's model build for the whole session -- every later physics command
+    fails and neither deleting the prim nor clear_scene recovers it (measured:
+    an empty stage, 0 prims, still failed). Only a restart does.
+
+    execute_script is the only path that can author such a joint, so it is named
+    specifically. import_urdf is NOT: measured on 6.0.1 Newton, the importer
+    applies ArticulationRootAPI itself (/World/twolink/Geometry/base_link) and
+    the import leaves physics healthy, so warning about it there would be false.
+
+    Keep this short. It is read by every agent on every session; it carries what
+    to do, not why.
+    """
+    src = _read_server_source()
+    assert "newton" in src.lower(), "the instruction block never mentions the engine at all"
+    assert "get_simulation_state reports `engine`" in src
+    assert "absent on 5.1" in src, "5.1 has no engine key; saying otherwise sends agents looking for it"
+    assert "do not converge" in src
+    assert "ArticulationRootAPI" in src
+    assert "restarting Isaac Sim" in src
+
+
+def test_the_engine_guidance_stays_short():
+    """A contract doc that explains mechanism stops being read."""
+    src = _read_server_source()
+    block = src[src.index("### Physics engine") : src.index("### Physics engine") + 800]
+    block = block.split('"""')[0]
+    assert len(block.splitlines()) <= 9, f"engine guidance grew to {len(block.splitlines())} lines"

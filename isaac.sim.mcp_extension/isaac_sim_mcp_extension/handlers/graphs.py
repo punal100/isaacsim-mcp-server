@@ -35,6 +35,20 @@ def register(registry: Dict[str, Any], adapter: IsaacAdapterBase) -> None:
     registry["graphs.edit_action_graph"] = lambda **p: edit_action_graph(adapter, **p)
 
 
+def _absolute_attr_path(graph_path: str, attr_spec: str) -> str:
+    """Resolve a relative attribute spec against its graph.
+
+    `og.Controller.edit(SET_VALUES)` does not resolve a bare
+    "ScriptNode.inputs:script" against the graph path it was handed — it fails
+    with "node=None, graph=None". Only usePath/scriptPath used to be resolved,
+    which left every other attribute — including the inline-script form this
+    tool documents — unsettable.
+    """
+    if attr_spec.startswith("/"):
+        return attr_spec
+    return f"{graph_path}/{attr_spec}"
+
+
 def force_recompile_scriptnode(graph, node) -> None:
     """Force a ScriptNode to re-read and recompile its script.
 
@@ -158,7 +172,13 @@ def create_action_graph(
         created_node_paths = [n.get_prim_path() for n in new_nodes] if new_nodes else []
 
         # ── attach script via direct attribute set ─────────────────
+        # Every step here is conditional, and each condition used to fail
+        # silently: a missing ScriptNode or an unresolvable attribute left the
+        # script unattached while the graph still reported success. The caller
+        # then played a graph that ticked and did nothing.
+        script_attached = None
         if (script_file is not None or inline_script is not None) and graph is not None:
+            script_attached = False
             script_node = graph.get_node(f"{graph_path}/ScriptNode")
             if script_node is not None and script_node.is_valid():
                 use_path_attr = script_node.get_attribute("inputs:usePath")
@@ -168,12 +188,28 @@ def create_action_graph(
                         og.Controller.set(use_path_attr, True)
                     if script_path_attr is not None and script_path_attr.is_valid():
                         og.Controller.set(script_path_attr, script_file)
+                        script_attached = True
                 else:  # inline_script
                     script_attr = script_node.get_attribute("inputs:script")
                     if use_path_attr is not None and use_path_attr.is_valid():
                         og.Controller.set(use_path_attr, False)
                     if script_attr is not None and script_attr.is_valid():
                         og.Controller.set(script_attr, inline_script)
+                        script_attached = True
+
+        if script_attached is False:
+            return {
+                "status": "error",
+                "message": (
+                    f"Action Graph created at {graph_path}, but the script could not be attached — "
+                    "its ScriptNode or the inputs:script/scriptPath attribute could not be resolved. "
+                    "The graph would tick and do nothing. Inspect it with list_prims and attach the "
+                    "script with edit_action_graph."
+                ),
+                "graph_path": graph_path,
+                "node_count": len(created_node_paths),
+                "nodes": created_node_paths,
+            }
 
         return {
             "status": "success",
@@ -203,6 +239,15 @@ def edit_action_graph(
     When script content or script path is changed, automatically resets
     state:omni_initialized to False to force the ScriptNode to reload.
     """
+    if not values and not connections:
+        # Reported "Updated graph" for a call carrying neither, so a caller that
+        # built its payload wrong was told the edit landed.
+        return {
+            "status": "error",
+            "message": (
+                "Nothing to change: pass `values` to set attributes or `connections` to wire nodes. Both were empty."
+            ),
+        }
     try:
         import omni.graph.core as og
 
@@ -231,9 +276,9 @@ def edit_action_graph(
 
                 # usePath and scriptPath need direct attribute set
                 if "inputs:usePath" in attr_spec or "inputs:scriptPath" in attr_spec:
-                    direct_set_list.append((attr_spec, val))
+                    direct_set_list.append((_absolute_attr_path(graph_path, attr_spec), val))
                 else:
-                    set_values_list.append((attr_spec, val))
+                    set_values_list.append((_absolute_attr_path(graph_path, attr_spec), val))
 
             # Apply SET_VALUES via og.Controller.edit() on existing graph
             if set_values_list:
@@ -251,10 +296,8 @@ def edit_action_graph(
                     return {"status": "error", "message": f"Graph not found at {graph_path}"}
 
                 for attr_spec, val in direct_set_list:
-                    # Resolve to absolute if relative
-                    if not attr_spec.startswith("/"):
-                        attr_spec = f"{graph_path}/{attr_spec}"
-
+                    # Already absolute: both branches resolve up front, so the
+                    # two paths cannot drift apart again.
                     # Split "…/NodeName.inputs:attrName" into node path + attr name
                     for sep in (".inputs:", ".outputs:", ".state:"):
                         dot_idx = attr_spec.rfind(sep)

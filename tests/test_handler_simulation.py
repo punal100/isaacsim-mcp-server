@@ -164,6 +164,27 @@ def test_set_physics_reports_parameters_it_cannot_apply():
     assert "gpu_enabled" in result["message"]
 
 
+def test_set_physics_reports_success_when_something_was_applied():
+    """A partial apply must not be reported as a failure.
+
+    Gravity really is written to the stage, so telling the caller `error` means
+    an agent believes nothing changed and may re-issue or compensate against a
+    gravity that is already set. Measured live on all three runtimes: gravity
+    3.71 was on the PhysicsScene while the response said error.
+    """
+    from isaac_sim_mcp_extension.handlers.simulation import set_physics
+
+    adapter = _GravityAdapter()
+    result = set_physics(adapter, gravity=[0, 0, -3.71], time_step=0.01)
+
+    assert result["status"] == "success", "a partial apply was reported as a failure"
+    assert adapter.calls == [[0, 0, -3.71]], "gravity was not actually applied"
+    assert result["applied"] == ["gravity"]
+    assert result["unsupported"] == ["time_step"]
+    # The caller still has to learn what was dropped.
+    assert "time_step" in result["message"]
+
+
 def test_set_physics_rejects_an_empty_request():
     from isaac_sim_mcp_extension.handlers.simulation import set_physics
 

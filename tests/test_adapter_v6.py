@@ -600,19 +600,32 @@ def _install_fake_omni(monkeypatch, timeline, app):
     monkeypatch.setitem(sys.modules, "omni.kit.app", fake_app_mod)
 
 
-def test_v6_step_must_not_pump_the_kit_event_loop(monkeypatch):
-    """step must not call omni.kit.app.update().
+def test_v6_step_pumps_only_for_newton(monkeypatch):
+    """PhysX stepping must not pump the kit event loop; Newton has to.
 
-    Handlers run as an asyncio Task on kit's main loop (see
-    SocketServer._dispatch_command). Pumping the loop from inside that Task
-    raises "Cannot enter into task <other> while another task <this handler> is
-    being executed" for every other pending kit task — property window,
-    viewport, USD cache listener, throttling, HTTP server — and invalidates the
-    physics tensor view, after which get_velocities fails with "Simulation view
-    object is invalidated". Verified on 6.0.1.
+    Pumping from inside the dispatch Task was believed unsafe everywhere: it can
+    raise "Cannot enter into task <other> while another task <this handler> is
+    being executed" for other pending kit tasks and invalidate the physics
+    tensor view, and asyncio only logs it, so step returns a plausible result
+    while the console shows the damage.
 
-    The errors never surface to the caller: asyncio logs them and step returns
-    a plausible-looking result, so only the kit console reveals the damage.
+    Re-measured on 6.0.1: it did not reproduce on either backend — 60 pumped
+    frames under isaac-sim.newton.sh logged no task errors and left the tensor
+    view valid (get_velocities returned -9.8100). None of the PhysX-side step
+    calls move Newton at all. Dropping a body from z=20 for 60 steps, where
+    free fall predicts z=15.095:
+
+        SimulationManager.step      z=20.0000  no motion
+        SimulationView.step(dt)     z=20.0000  no motion
+        physx.update_simulation     z=20.0000  no motion
+        pumped app.update()         z=15.0133  runs
+
+    That was once read as "no direct solver step advances Newton", which was
+    wrong — NewtonStage.step_sim does, exactly, and is now the preferred path
+    (see _newton_step_direct). The pump remains as the fallback for builds
+    without it, and must stay behind the Newton branch either way: PhysX keeps
+    SimulationManager.step because it is frame-exact and pumping changes its
+    answers (-2.987 against -3.322 over the same fall).
     """
     import ast
     import os
@@ -628,14 +641,31 @@ def test_v6_step_must_not_pump_the_kit_event_loop(monkeypatch):
     with open(src_path) as f:
         text = f.read()
     tree = ast.parse(text)
-    step_src = None
+    step_node = None
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "step":
-            step_src = ast.get_source_segment(text, node)
+            step_node = node
             break
-    assert step_src is not None, "v6.step not found"
-    code = "\n".join(line.split("#", 1)[0] for line in step_src.splitlines())
-    assert "get_app().update()" not in code, "v6.step must not pump the kit event loop"
+    assert step_node is not None, "v6.step not found"
+
+    def strip_comments(segment):
+        return "\n".join(line.split("#", 1)[0] for line in segment.splitlines())
+
+    # The pump has to sit inside a branch selected by the active engine, and the
+    # other side of that branch has to be the exact PhysX step.
+    guarded = False
+    for node in ast.walk(step_node):
+        if not isinstance(node, ast.If):
+            continue
+        body = strip_comments("\n".join(ast.get_source_segment(text, n) or "" for n in node.body))
+        orelse = strip_comments("\n".join(ast.get_source_segment(text, n) or "" for n in node.orelse))
+        if "get_app().update()" in body and "SimulationManager.step" in orelse:
+            guarded = True
+            break
+    assert guarded, "the pump must be behind an engine branch whose other side is SimulationManager.step"
+
+    code = strip_comments(ast.get_source_segment(text, step_node) or "")
+    assert "newton" in code, "the branch must select on the Newton engine"
     assert "SimulationManager.step" in code
 
 
@@ -974,3 +1004,170 @@ def test_v6_get_simulation_state_survives_a_missing_stage(monkeypatch):
 
     assert state["timeline_state"] == "stopped"
     assert state["physics_dt"] == 1.0 / 60.0
+
+
+# Newton's MuJoCo solver has no mapping for GeoType.CONE (9). Hitting it makes
+# Kit latch NewtonStage._init_failed = True, which permanently disables physics
+# for the whole session — deleting the cone, clear_scene and rebuilding the
+# PhysicsScene were all verified NOT to recover it on 6.0.1-rc.7. The adapter
+# therefore has to refuse *before* initialize_physics(), and only on Newton:
+# cones are fine under PhysX and on 5.1.
+def _cone_stage_adapter(monkeypatch, engine, prims):
+    """Build a V6 adapter over a stubbed stage of (type_name, has_articulation) prims."""
+
+    class _Prim:
+        def __init__(self, path, type_name, articulation):
+            self._path = path
+            self._type = type_name
+            self._articulation = articulation
+
+        def GetTypeName(self):
+            return self._type
+
+        def GetPath(self):
+            return self._path
+
+        def HasAPI(self, api):
+            return self._articulation
+
+    class _Stage:
+        def Traverse(self):
+            return [_Prim(path, type_name, art) for path, type_name, art in prims]
+
+    # Keep conftest's omni stub (the extension needs omni.ext at import time)
+    # and swap in only the stage-serving omni.usd.
+    omni_mod = sys.modules["omni"]
+    fake_usd_mod = types.ModuleType("omni.usd")
+    fake_usd_mod.get_context = lambda: types.SimpleNamespace(get_stage=lambda: _Stage())
+    monkeypatch.setitem(sys.modules, "omni.usd", fake_usd_mod)
+    monkeypatch.setattr(omni_mod, "usd", fake_usd_mod, raising=False)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacsim.core.simulation_manager",
+        types.SimpleNamespace(
+            SimulationManager=type(
+                "SM",
+                (),
+                {"get_active_physics_engine": classmethod(lambda cls, e=engine: e)},
+            )
+        ),
+    )
+
+    import importlib
+
+    import isaac_sim_mcp_extension.adapters.v6 as v6_mod
+
+    importlib.reload(v6_mod)
+    return v6_mod.IsaacAdapterV6()
+
+
+def test_v6_refuses_newton_physics_init_on_a_cone_with_an_articulation(monkeypatch):
+    adapter = _cone_stage_adapter(
+        monkeypatch,
+        "newton",
+        [("/World/Cone", "Cone", False), ("/World/Arm", "Xform", True)],
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter._guard_newton_unsupported_geometry()
+    message = str(excinfo.value)
+    assert "/World/Cone" in message
+    assert "PhysX" in message
+
+
+def test_v6_allows_a_cone_when_no_articulation_is_present(monkeypatch):
+    # Verified live: a cone alone simulates fine on Newton. Only the
+    # cone + articulation combination reaches the MuJoCo conversion.
+    adapter = _cone_stage_adapter(monkeypatch, "newton", [("/World/Cone", "Cone", False)])
+    adapter._guard_newton_unsupported_geometry()
+
+
+def test_v6_allows_a_cone_with_an_articulation_under_physx(monkeypatch):
+    adapter = _cone_stage_adapter(
+        monkeypatch,
+        "physx",
+        [("/World/Cone", "Cone", False), ("/World/Arm", "Xform", True)],
+    )
+    adapter._guard_newton_unsupported_geometry()
+
+
+# Newton builds its model once and rebuilds it from the timeline STOP event. A
+# step-only debug loop never stops, so after a clear_scene the model keeps the
+# DELETED prims and never learns about the new ones — and Newton keeps stepping
+# that phantom scene. Measured on 6.0.1-rc.7 through the MCP tools: clear_scene
+# from a paused timeline, create a sphere at z=2, step 60, and step reports
+# z=2.0 with zero velocity while model.body_label still reads ['/World/Ball']
+# for a prim that no longer exists. sim_time and the step counter advance the
+# whole time, so nothing looks wrong. The same drop after a stop_simulation
+# lands correctly at z=0.149.
+def _v6_function_src(name):
+    import ast
+    import os
+
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "isaac.sim.mcp_extension", "isaac_sim_mcp_extension", "adapters", "v6.py"
+    )
+    with open(path) as f:
+        text = f.read()
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node) or ""
+    return ""
+
+
+def test_v6_step_rebuilds_a_stale_newton_model():
+    src = _v6_function_src("step")
+    assert "_refresh_newton_model_if_stale" in src, "step must rebuild a Newton model that no longer matches the stage"
+
+
+def test_v6_newton_model_rebuild_is_newton_only_and_never_runs_while_playing():
+    """PhysX must not be touched, and a rebuild under a live scene is unsafe."""
+    src = _v6_function_src("_refresh_newton_model_if_stale")
+    assert src, "_refresh_newton_model_if_stale not found"
+    assert 'self._engine != "newton"' in src, "the rebuild must not touch PhysX"
+    assert "is_playing" in src, "a rebuild underneath a running scene is what aborts the GPU pipeline"
+    assert "_init_failed" in src, "a latched Newton failure (see the cone guard) must be left alone"
+
+
+def test_v6_step_reprimes_physics_after_a_newton_model_rebuild():
+    """The play/pump/pause cycle invalidates the tensor view the rebuild left valid.
+
+    Without this the next joint read degrades to the drive-target fallback and
+    echoes the caller's own command back — caught live by position_source.
+    """
+    src = _v6_function_src("step")
+    assert "_ensure_physics_world" in src, "step must re-prime physics after rebuilding the Newton model"
+
+
+def test_v6_articulation_calls_heal_a_stale_physics_view():
+    """V6 needs the same heal-and-retry V5 got — PhysX was returning echoes.
+
+    Measured at HEAD on 6.0.1 PhysX before this: set_joint_positions, create a
+    prim, step, read — and the read fell through to the USD drive targets,
+    reporting the commanded -0.4000 back as a measurement while the dropped
+    sphere proved physics was running fine.
+    """
+    for name in ("get_joint_positions", "set_joint_positions", "_get_joint_names"):
+        src = _v6_function_src(name)
+        assert src, f"{name} not found"
+        assert "_try_articulation" in src, f"{name} must heal a stale physics view and retry once"
+
+
+def test_v6_physics_view_refresh_refuses_while_the_timeline_is_live():
+    src = _v6_function_src("_refresh_stale_physics_view")
+    assert src, "_refresh_stale_physics_view not found"
+    assert "is_playing" in src, "rebuilding under a running scene is what aborts the GPU pipeline"
+    assert "_warmup_needed" in src, "initialize_physics() early-returns unless the warmup flag is set"
+
+
+def test_v6_get_prim_transform_labels_a_usd_fallback_on_newton():
+    """Newton keeps simulated poses in Fabric, so an untagged USD read is a spawn pose.
+
+    Measured on 6.0.1: a sphere resting on the ground still read z=2.0 from USD
+    while get_prim_info reported it with no source at all.
+    """
+    src = _v6_function_src("get_prim_transform")
+    assert src, "get_prim_transform not found"
+    assert '"usd"' in src, "a USD-sourced position on Newton must say so"
+    assert "position_warning" in src, "the caller has to be told it may be the spawn pose"
