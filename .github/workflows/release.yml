@@ -59,6 +59,59 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  publish-registry:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # mcp-publisher login github-oidc; no stored secret
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp the tag version into server.json
+        # server.json carries the version twice and the registry rejects a
+        # publish whose package version is not on PyPI. Deriving both from the
+        # tag is what keeps the listing from drifting: 0.5.0 through 0.6.0 all
+        # shipped to PyPI while the registry entry sat at 0.4.1, because this
+        # step did not exist and nobody bumped it by hand.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+
+      - name: Wait for the release to be visible on PyPI
+        # The registry validates ownership by fetching the PyPI metadata for
+        # this exact version and looking for the `mcp-name:` marker that
+        # README.md puts in the long description. Publishing before the index
+        # has the new version fails that check, so poll rather than race it.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for _ in $(seq 1 30); do
+            if curl -sf "https://pypi.org/pypi/isaacsim-mcp-server/$VERSION/json" > /dev/null; then
+              echo "isaacsim-mcp-server $VERSION is on PyPI"
+              exit 0
+            fi
+            echo "waiting for isaacsim-mcp-server $VERSION on PyPI..."
+            sleep 10
+          done
+          echo "::error::isaacsim-mcp-server $VERSION never appeared on PyPI"
+          exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish
+
   github-release:
     needs: build-and-publish
     runs-on: ubuntu-latest
