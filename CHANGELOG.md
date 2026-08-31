@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cameras could not be deleted** — the sensor wrapper re-created the prim a tick later.
 - **Commands sent during startup failed with a raw `AttributeError`** — the socket opens seconds before Kit has a stage.
 - **`apply_material` leaked a raw USD C++ error** naming NVIDIA's build tree.
+- **`pip install isaacsim-mcp-server` produced a package that could not start** — the `mcp` dependency was unbounded, so a fresh install resolved mcp 2.x, where `FastMCP` was renamed and `mcp.server.fastmcp` no longer exists. This affects 0.5.2 on PyPI today, not only this release.
 - **`create_object(color=...)` was accepted and discarded** — the parameter was documented and sent, no prim was ever coloured, and the call reported success.
 - **`search_usd` dropped `position` and `scale`** — the asset landed at the origin at native scale, reported as success.
 - **`set_joint_positions` reported the same success whether or not the robot took the command** — when the articulation refuses it, the values are written to USD drive targets, which move nothing until physics initialises again. The response now carries `command_source` and warns on the fallback.
