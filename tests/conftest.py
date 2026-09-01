@@ -52,6 +52,11 @@ def _install_isaac_stubs() -> None:
         carb_settings = _make_stub("carb.settings")
         carb_settings.get_settings = lambda: _make_stub("_carb_settings_instance")
         carb_mod.settings = carb_settings  # type: ignore[attr-defined]
+        # carb's logging functions are no-ops outside Kit; without them any
+        # tested path that logs (e.g. extension._env_int on a malformed value)
+        # raises AttributeError on the bare stub.
+        for _fn in ("log_warn", "log_info", "log_error", "log_warning", "log_verbose"):
+            setattr(carb_mod, _fn, lambda *args, **kwargs: None)
         sys.modules["carb"] = carb_mod
         sys.modules["carb.settings"] = carb_settings
 

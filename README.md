@@ -53,10 +53,11 @@ cd isaacsim-mcp-server
 | NVIDIA Isaac Sim | `5.1.0` - `6.0.1` (PhysX or Newton) |
 | Python | `3.10+` |
 | `uv` | latest (for source install) |
-| Platform | Linux (Ubuntu 22.04+) |
+| Platform | Linux (Ubuntu 22.04+) or Windows 10/11 |
 
 > [!IMPORTANT]
-> Currently only **Linux** is supported. Windows support is planned.
+> **Linux** and **Windows** are supported. On Windows, use the PowerShell
+> launcher `scripts/run_isaac_sim.ps1` in place of the `.sh` scripts (see below).
 > macOS is not supported because NVIDIA Isaac Sim does not run on macOS.
 
 > [!NOTE]
@@ -73,6 +74,13 @@ If you installed from source:
 
 ```bash
 ./scripts/setup_python_env.sh
+```
+
+**On Windows**, `uv sync` creates the virtual environment (`.venv`) and installs
+the package plus its dependencies:
+
+```powershell
+uv sync
 ```
 
 ### 2. Launch Isaac Sim with the extension
@@ -105,6 +113,20 @@ the command line is forwarded to Kit untouched. The server auto-detects the
 active engine, so no MCP-side configuration changes. Newton requires 6.0 or
 newer; asking for it on 5.1.0 fails with a clear message.
 
+**On Windows**, use the PowerShell launcher instead. It takes the same engine
+selection and forwards extra arguments to Kit:
+
+```powershell
+.\scripts\run_isaac_sim.ps1                          # PhysX (default)
+.\scripts\run_isaac_sim.ps1 -Engine newton           # Newton
+$env:ISAACSIM_ENGINE = 'newton'; .\scripts\run_isaac_sim.ps1
+```
+
+The script resolves the install from `-IsaacSimRoot`, then `$env:ISAACSIM_ROOT`,
+then a local source build, then `C:\isaacsim`, then `%USERPROFILE%\isaacsim`. It
+also creates a writable USD working directory (`.cache\usd`) since Windows has no
+`/tmp`.
+
 <details>
 <summary>Optional: Beaver3D / NVIDIA API keys for 3D generation</summary>
 
@@ -114,11 +136,21 @@ export ARK_API_KEY="<your beaver3d api key>"
 export NVIDIA_API_KEY="<your nvidia api key>"
 ```
 
+On Windows (PowerShell):
+
+```powershell
+$env:BEAVER3D_MODEL = "<your beaver3d model name>"
+$env:ARK_API_KEY = "<your beaver3d api key>"
+$env:NVIDIA_API_KEY = "<your nvidia api key>"
+```
+
 </details>
 
 ### 3. Connect your IDE
 
 Add the MCP server to your editor. Replace the path with your actual repo location.
+The `command` examples are for **Linux/macOS**; each guide shows the **Windows**
+equivalent, which wraps the PowerShell launcher `scripts\run_mcp_server.ps1`.
 
 <details>
 <summary><strong>Claude Code (CLI)</strong></summary>
@@ -134,6 +166,23 @@ Or edit `~/.claude.json` / `.mcp.json`:
   "mcpServers": {
     "isaac-sim": {
       "command": "/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh"
+    }
+  }
+}
+```
+
+On Windows, wrap the PowerShell launcher:
+
+```bash
+claude mcp add isaac-sim -- powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1
+```
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
     }
   }
 }
@@ -156,6 +205,19 @@ Create `.vscode/mcp.json` in your workspace:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "servers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
@@ -168,6 +230,19 @@ Open **Cursor Settings > MCP**, or edit `~/.cursor/mcp.json`:
   "mcpServers": {
     "isaac-sim": {
       "command": "/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh"
+    }
+  }
+}
+```
+
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
     }
   }
 }
@@ -194,6 +269,19 @@ Edit the config file for your platform:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
@@ -211,12 +299,30 @@ Open **Windsurf Settings > MCP** or edit `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><strong>JetBrains IDEs</strong></summary>
 
-Go to **Settings > Tools > AI Assistant > MCP Servers** and add the server. See the [JetBrains MCP docs](https://www.jetbrains.com/help/idea/model-context-protocol.html) for details.
+Go to **Settings > Tools > AI Assistant > MCP Servers** and add the server, with
+the command `/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh`. See the
+[JetBrains MCP docs](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) for details.
+
+On Windows, set the command to `powershell` and the arguments to
+`-NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1`.
 
 </details>
 
@@ -422,8 +528,10 @@ The inspector is available at `http://localhost:5173`.
 | Script | Purpose | Default |
 |--------|---------|---------|
 | `setup_python_env.sh` | Create venv and install package | Python 3.10 |
-| `run_isaac_sim.sh` | Launch Isaac Sim with extension | `$HOME/isaacsim` |
-| `run_mcp_server.sh` | Start the MCP server | Port 8766 |
+| `run_isaac_sim.sh` | Launch Isaac Sim with extension (Linux) | `$HOME/isaacsim` |
+| `run_isaac_sim.ps1` | Launch Isaac Sim with extension (Windows) | `C:\isaacsim` |
+| `run_mcp_server.sh` | Start the MCP server (Linux) | Port 8766 |
+| `run_mcp_server.ps1` | Start the MCP server (Windows) | Port 8766 |
 | `launch_isaac_sim_mcp.sh` | Combined launcher | Auto-assigns port |
 | `dev_mcp_server.sh` | Dev server with hot-reload | Port 8766 |
 

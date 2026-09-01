@@ -23,6 +23,7 @@
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import carb
@@ -45,7 +46,7 @@ class USDLoader:
         """
         self.usd_prim = None
         self.material = None
-        self.working_dir = Path(os.environ.get("USD_WORKING_DIR", "/tmp/usd"))
+        self.working_dir = Path(os.environ.get("USD_WORKING_DIR") or Path(tempfile.gettempdir()) / "usd")
         self.stage = omni.usd.get_context().get_stage()
 
     def load_usd_model(self, abs_path=None, task_id=None):
@@ -398,9 +399,11 @@ class USDLoader:
         """
         loader = USDLoader()
 
-        # Test with absolute paths
-        model_path = "/tmp/usd/cgt-20250408202506-6tdc4/output.usd"
-        texture_path = "/tmp/usd/cgt-20250408202506-6tdc4/textures/material_0.png"
+        # Test with absolute paths, rooted at the platform working dir rather
+        # than a POSIX-only /tmp so this runs on Windows as well.
+        sample = loader.working_dir / "cgt-20250408202506-6tdc4"
+        model_path = str(sample / "output.usd")
+        texture_path = str(sample / "textures" / "material_0.png")
 
         try:
             # Load model

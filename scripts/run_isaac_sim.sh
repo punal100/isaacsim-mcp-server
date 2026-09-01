@@ -24,6 +24,11 @@ echo "Isaac Sim: $ISAAC_SIM_SH"
 echo "Engine:    $ISAACSIM_ENGINE"
 echo "Extension: $EXTENSION_ID"
 
+# This bare launcher does not set the socket port: it leaves that to the
+# manifest/defaults, and launch_isaac_sim_mcp.sh is what injects
+# --/exts/.../server.port. The Windows counterpart (run_isaac_sim.ps1) has no
+# launch_isaac_sim_mcp.ps1 to pair with, so it folds a -Port option in itself --
+# that divergence is intentional, not a bug.
 exec "$ISAAC_SIM_SH" \
   --ext-folder "$REPO_ROOT" \
   --enable "$EXTENSION_ID" \
