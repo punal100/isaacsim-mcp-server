@@ -54,6 +54,32 @@ def _env_int(name: str) -> Optional[int]:
         return None
 
 
+def _resolve_endpoint(settings: Any) -> tuple[str, int]:
+    """Resolve the socket (host, port) from Kit settings and the environment.
+
+    First hit wins. The legacy ``/exts/isaac.sim.mcp/`` prefix is read first
+    because the launcher scripts pass it explicitly on the Kit command line.
+    Kit itself populates the manifest ``[settings]`` block under the extension
+    folder name, ``/exts/isaac.sim.mcp_extension/`` (with the port under
+    ``server.socket``), so those are read next, then the ISAAC_MCP_PORT /
+    ISAAC_MCP_HOST environment variables, then the built-in defaults.
+    """
+    port = (
+        settings.get("/exts/isaac.sim.mcp/server.port")
+        or settings.get("/exts/isaac.sim.mcp_extension/server.port")
+        or settings.get("/exts/isaac.sim.mcp_extension/server.socket")
+        or _env_int("ISAAC_MCP_PORT")
+        or 8766
+    )
+    host = (
+        settings.get("/exts/isaac.sim.mcp/server.host")
+        or settings.get("/exts/isaac.sim.mcp_extension/server.host")
+        or os.environ.get("ISAAC_MCP_HOST")
+        or "localhost"
+    )
+    return host, port
+
+
 class MCPExtension(omni.ext.IExt):
     def __init__(self):
         super().__init__()
@@ -67,19 +93,7 @@ class MCPExtension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
         print("trigger  on_startup for: ", ext_id)
         self.ext_id = ext_id
-        port = (
-            self._settings.get("/exts/isaac.sim.mcp/server.port")
-            or self._settings.get("/exts/isaac.sim.mcp_extension/server.port")
-            or self._settings.get("/exts/isaac.sim.mcp_extension/server.socket")
-            or _env_int("ISAAC_MCP_PORT")
-            or 8766
-        )
-        host = (
-            self._settings.get("/exts/isaac.sim.mcp/server.host")
-            or self._settings.get("/exts/isaac.sim.mcp_extension/server.host")
-            or os.environ.get("ISAAC_MCP_HOST")
-            or "localhost"
-        )
+        host, port = _resolve_endpoint(self._settings)
 
         self._adapter = get_adapter()
         register_all_handlers(self._registry, self._adapter)
