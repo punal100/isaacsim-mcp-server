@@ -170,6 +170,11 @@ Write-Host "MCP port:    $Port (localhost only)"
 Write-Host "USD workdir: $env:USD_WORKING_DIR"
 Write-Host ''
 
+# The bare Linux launcher (run_isaac_sim.sh) does NOT set the port -- it leaves
+# it to the manifest/defaults, and launch_isaac_sim_mcp.sh is what injects
+# --/exts/.../server.port. There is no launch_isaac_sim_mcp.ps1, so this script
+# folds the -Port handling in here. The extension reads this legacy prefix first
+# (see _resolve_endpoint), so it wins over the manifest.
 $argList = @(
     '--ext-folder', $repoRoot
     '--enable',     $extensionId
