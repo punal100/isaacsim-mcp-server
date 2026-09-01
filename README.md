@@ -11,7 +11,7 @@
 
 > Natural language control for NVIDIA Isaac Sim through the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP).
 
-Connect any MCP-compatible IDE (Cursor, VS Code, Claude Code, Windsurf, JetBrains) to a running Isaac Sim instance and control it with plain-English prompts -- create robots, build scenes, run simulations, and debug physics all from your editor.
+Connect any MCP-compatible IDE (Cursor, VS Code, Claude Code, Windsurf, Antigravity, JetBrains) to a running Isaac Sim instance and control it with plain-English prompts -- create robots, build scenes, run simulations, and debug physics all from your editor.
 
 ![Robot Simulate Demo](https://raw.githubusercontent.com/whats2000/isaacsim-mcp-server/main/media/franka_pick_place.gif)
 
@@ -288,6 +288,38 @@ On Windows, wrap the PowerShell launcher:
 <summary><strong>Windsurf</strong></summary>
 
 Open **Windsurf Settings > MCP** or edit `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh"
+    }
+  }
+}
+```
+
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Antigravity</strong></summary>
+
+Open the agent side panel, click **…** > **MCP Servers** > **Manage MCP Servers** >
+**View raw config**, or edit `~/.gemini/config/mcp_config.json` (global) or
+`.agents/mcp_config.json` (workspace):
 
 ```json
 {
