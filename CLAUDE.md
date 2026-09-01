@@ -57,6 +57,22 @@ Five places, in order: `isaac_mcp/tools/<category>.py` → new command string �
 - ScriptNode scripts must define `setup(db)`/`compute(db)`; legacy mode (no `compute`) breaks exec scoping. Full rules in [isaac.sim.mcp_extension/.cursorrules](isaac.sim.mcp_extension/.cursorrules); working example in [demo/franka_pick_place.py](demo/franka_pick_place.py).
 - Design docs and plans for past feature work live in [docs/superpowers/](docs/superpowers/).
 
+## Cutting a release
+
+Pushing an annotated tag `vX.Y.Z` triggers [.github/workflows/release.yml](.github/workflows/release.yml): lint + unit tests, build the wheel, publish to PyPI, then stamp the tag version into `server.json` on the runner and publish to the MCP Registry. **The tag is the source of the published version** — a release is not cut without the live sweep CONTRIBUTING requires, and the tag message states what was verified live and on which Isaac Sim runtime(s).
+
+Before tagging, bump by hand **only** what the build and the changelog read:
+
+- **`isaac_mcp/__init__.py`** (`__version__`) — MUST. `pyproject.toml` is `dynamic = ["version"]` and reads it; this is the PyPI wheel version.
+- **`CHANGELOG.md`** — MUST cut `[Unreleased]` into `[X.Y.Z] - <date>`.
+- **`isaac.sim.mcp_extension/config/extension.toml`** (`version`) — bump when the extension itself changed this cycle. It is a separate artifact (not on PyPI) and has historically lagged the package; keep it in step when the shipped extension differs.
+
+Do **not** hand-bump these — they are derived or cosmetic, and a stale value here does **not** affect the deploy (verified: 0.6.1 published to PyPI and the registry while the committed `server.json` still read 0.6.0):
+
+- **`server.json`** — `release.yml` stamps both `.version` and `.packages[0].version` from the tag on the runner; the committed copy is never read at publish. It therefore lags in the repo by design. Sync it by hand only if a stale number bothers you.
+- **`pyproject.toml`** — dynamic version, nothing to change.
+- **`uv.lock`** — the editable root package carries no pinned `version` line.
+
 ## Changelog and issues
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/): `Added` / `Changed` / `Fixed`, newest version first, and a dated heading when the version is cut.
