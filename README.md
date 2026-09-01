@@ -75,6 +75,13 @@ If you installed from source:
 ./scripts/setup_python_env.sh
 ```
 
+**On Windows**, `uv sync` creates the virtual environment (`.venv`) and installs
+the package plus its dependencies:
+
+```powershell
+uv sync
+```
+
 ### 2. Launch Isaac Sim with the extension
 
 ```bash
@@ -126,6 +133,14 @@ also creates a writable USD working directory (`.cache\usd`) since Windows has n
 export BEAVER3D_MODEL="<your beaver3d model name>"
 export ARK_API_KEY="<your beaver3d api key>"
 export NVIDIA_API_KEY="<your nvidia api key>"
+```
+
+On Windows (PowerShell):
+
+```powershell
+$env:BEAVER3D_MODEL = "<your beaver3d model name>"
+$env:ARK_API_KEY = "<your beaver3d api key>"
+$env:NVIDIA_API_KEY = "<your nvidia api key>"
 ```
 
 </details>
