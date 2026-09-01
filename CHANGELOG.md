@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-01
+
 ### Added
 - **Releases publish to the MCP Registry** — a tagged release now stamps the tag version into `server.json` and runs `mcp-publisher` (GitHub Actions OIDC, no stored secret) after the PyPI upload. The listing had been hand-published and sat at 0.4.1 while 0.5.0 through 0.6.0 shipped to PyPI.
 - **Windows support** — `scripts/run_isaac_sim.ps1` launches Isaac Sim with the extension on Windows 10/11, with the same PhysX/Newton engine selection as the Linux launcher (`-Engine`, `$env:ISAACSIM_ENGINE`, `--physx`/`--newton`). Resolves the install from `-IsaacSimRoot`, `ISAACSIM_ROOT`, a local source build, `C:\isaacsim`, or `%USERPROFILE%\isaacsim`.
+- **Antigravity IDE guide** — the README's *Connect your IDE* section now covers Google's Antigravity IDE, with both the global (`~/.gemini/config/mcp_config.json`) and workspace (`.agents/mcp_config.json`) config locations and a Windows PowerShell-launcher variant.
 
 ### Fixed
 - **Manifest server host/port were read from a settings path Kit never populates.** Kit derives the setting prefix from the extension folder name (`/exts/isaac.sim.mcp_extension/`), but `on_startup` read `/exts/isaac.sim.mcp/` with the wrong key (`server.port` vs `server.socket`), so host and port always fell through to the hardcoded defaults. Now reads the manifest path and falls back to `ISAAC_MCP_PORT` / `ISAAC_MCP_HOST`.

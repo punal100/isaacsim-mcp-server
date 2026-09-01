@@ -429,7 +429,7 @@ Handlers -> Adapter -> Isaac Sim 5.1 / 6.0 APIs
 
 ## Known Limitations
 
-Open defects in 0.6.0 that a normal session can hit. Each is warned about at the
+Open defects a normal session can hit. Each is warned about at the
 point of use where that is possible; this list is for choosing a runtime before
 you start.
 
