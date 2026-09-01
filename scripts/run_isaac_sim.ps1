@@ -108,14 +108,23 @@ if (-not $engineLaunchers.ContainsKey($selectedEngine)) {
 }
 $launcherName = $engineLaunchers[$selectedEngine]
 
-# Resolve the Isaac Sim install: explicit param, env var, local source build,
-# the default Windows installer location, then the user home install.
-$candidates = @()
-if ($IsaacSimRoot)      { $candidates += $IsaacSimRoot }
-if ($env:ISAACSIM_ROOT) { $candidates += $env:ISAACSIM_ROOT }
-$candidates += (Join-Path $repoRoot '..\IsaacSim\_build\windows-x86_64\release')
-$candidates += 'C:\isaacsim'
-$candidates += (Join-Path $env:USERPROFILE 'isaacsim')
+# Resolve the Isaac Sim install. An explicit root (-IsaacSimRoot, else
+# $env:ISAACSIM_ROOT) is authoritative: it is the ONLY candidate, so a wrong or
+# engine-incompatible root fails loudly here instead of silently falling through
+# to a different install (e.g. asking for Newton against a 5.1 root must not
+# resolve to a 6.0 install elsewhere). Only when no root is given do we
+# auto-discover: local source build, the default installer path, the home install.
+if ($IsaacSimRoot) {
+    $candidates = @($IsaacSimRoot)
+} elseif ($env:ISAACSIM_ROOT) {
+    $candidates = @($env:ISAACSIM_ROOT)
+} else {
+    $candidates = @(
+        (Join-Path $repoRoot '..\IsaacSim\_build\windows-x86_64\release')
+        'C:\isaacsim'
+        (Join-Path $env:USERPROFILE 'isaacsim')
+    )
+}
 
 $launcher = $null
 foreach ($candidate in $candidates) {
