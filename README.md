@@ -133,17 +133,8 @@ export NVIDIA_API_KEY="<your nvidia api key>"
 ### 3. Connect your IDE
 
 Add the MCP server to your editor. Replace the path with your actual repo location.
-
-> [!NOTE]
-> **On Windows**, the examples below use the bash launcher `run_mcp_server.sh`,
-> which does not run on Windows. Use one of these as the `command` instead:
-> - the PowerShell launcher via a wrapper — `"command": "powershell"` with
->   `"args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]`; or
-> - the installed CLI directly (no wrapper needed) —
->   `"command": "C:\\path\\to\\isaacsim-mcp-server\\.venv\\Scripts\\isaacsim-mcp-server.exe"`.
->
-> For the Claude Code CLI:
-> `claude mcp add isaac-sim -- powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1`
+The `command` examples are for **Linux/macOS**; each guide shows the **Windows**
+equivalent, which wraps the PowerShell launcher `scripts\run_mcp_server.ps1`.
 
 <details>
 <summary><strong>Claude Code (CLI)</strong></summary>
@@ -159,6 +150,23 @@ Or edit `~/.claude.json` / `.mcp.json`:
   "mcpServers": {
     "isaac-sim": {
       "command": "/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh"
+    }
+  }
+}
+```
+
+On Windows, wrap the PowerShell launcher:
+
+```bash
+claude mcp add isaac-sim -- powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1
+```
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
     }
   }
 }
@@ -181,6 +189,19 @@ Create `.vscode/mcp.json` in your workspace:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "servers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
@@ -193,6 +214,19 @@ Open **Cursor Settings > MCP**, or edit `~/.cursor/mcp.json`:
   "mcpServers": {
     "isaac-sim": {
       "command": "/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh"
+    }
+  }
+}
+```
+
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
     }
   }
 }
@@ -219,6 +253,19 @@ Edit the config file for your platform:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
@@ -236,12 +283,30 @@ Open **Windsurf Settings > MCP** or edit `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
+On Windows, wrap the PowerShell launcher:
+
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]
+    }
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><strong>JetBrains IDEs</strong></summary>
 
-Go to **Settings > Tools > AI Assistant > MCP Servers** and add the server. See the [JetBrains MCP docs](https://www.jetbrains.com/help/idea/model-context-protocol.html) for details.
+Go to **Settings > Tools > AI Assistant > MCP Servers** and add the server, with
+the command `/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh`. See the
+[JetBrains MCP docs](https://www.jetbrains.com/help/idea/model-context-protocol.html) for details.
+
+On Windows, set the command to `powershell` and the arguments to
+`-NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1`.
 
 </details>
 
