@@ -134,6 +134,17 @@ export NVIDIA_API_KEY="<your nvidia api key>"
 
 Add the MCP server to your editor. Replace the path with your actual repo location.
 
+> [!NOTE]
+> **On Windows**, the examples below use the bash launcher `run_mcp_server.sh`,
+> which does not run on Windows. Use one of these as the `command` instead:
+> - the PowerShell launcher via a wrapper — `"command": "powershell"` with
+>   `"args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\path\\to\\isaacsim-mcp-server\\scripts\\run_mcp_server.ps1"]`; or
+> - the installed CLI directly (no wrapper needed) —
+>   `"command": "C:\\path\\to\\isaacsim-mcp-server\\.venv\\Scripts\\isaacsim-mcp-server.exe"`.
+>
+> For the Claude Code CLI:
+> `claude mcp add isaac-sim -- powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1`
+
 <details>
 <summary><strong>Claude Code (CLI)</strong></summary>
 
@@ -438,7 +449,8 @@ The inspector is available at `http://localhost:5173`.
 | `setup_python_env.sh` | Create venv and install package | Python 3.10 |
 | `run_isaac_sim.sh` | Launch Isaac Sim with extension (Linux) | `$HOME/isaacsim` |
 | `run_isaac_sim.ps1` | Launch Isaac Sim with extension (Windows) | `C:\isaacsim` |
-| `run_mcp_server.sh` | Start the MCP server | Port 8766 |
+| `run_mcp_server.sh` | Start the MCP server (Linux) | Port 8766 |
+| `run_mcp_server.ps1` | Start the MCP server (Windows) | Port 8766 |
 | `launch_isaac_sim_mcp.sh` | Combined launcher | Auto-assigns port |
 | `dev_mcp_server.sh` | Dev server with hot-reload | Port 8766 |
 
