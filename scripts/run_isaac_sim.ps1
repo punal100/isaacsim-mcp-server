@@ -4,8 +4,9 @@
 
 .DESCRIPTION
     Windows counterpart to scripts/run_isaac_sim.sh. Resolves the Isaac Sim
-    launcher, verifies the extension manifest is present, then starts Isaac Sim
-    with this repo registered as an extension search folder.
+    launcher for the requested physics engine, verifies the extension manifest
+    is present, then starts Isaac Sim with this repo registered as an extension
+    search folder.
 
     The MCP extension opens a TCP socket (default localhost:8766) that the
     isaacsim-mcp-server process connects to. Because that socket accepts
@@ -13,17 +14,29 @@
     and must never be exposed to another host.
 
 .PARAMETER IsaacSimRoot
-    Directory containing isaac-sim.bat. Defaults to $env:ISAACSIM_ROOT, then to
-    the local source build at <repo>/_build/windows-x86_64/release.
+    Directory containing the Isaac Sim launcher (isaac-sim.bat). Defaults to
+    $env:ISAACSIM_ROOT, then the local source build at
+    <repo>/../IsaacSim/_build/windows-x86_64/release, then C:\isaacsim, then
+    $env:USERPROFILE\isaacsim.
+
+.PARAMETER Engine
+    Physics engine: physx (default) or newton. Selects isaac-sim.bat vs
+    isaac-sim.newton.bat. Overridable with $env:ISAACSIM_ENGINE or the
+    --physx / --newton / --engine <name> flags (later wins), matching
+    run_isaac_sim.sh. Newton ships with Isaac Sim 6.0 and later.
 
 .PARAMETER Port
     TCP port for the extension socket. Defaults to $env:ISAAC_MCP_PORT or 8766.
 
 .PARAMETER ExtraArgs
-    Any remaining arguments are forwarded verbatim to isaac-sim.bat.
+    Any remaining arguments are forwarded verbatim to the launcher. Engine
+    selectors (--physx / --newton / --engine) are consumed here, not forwarded.
 
 .EXAMPLE
     .\run_isaac_sim.ps1
+
+.EXAMPLE
+    .\run_isaac_sim.ps1 -Engine newton
 
 .EXAMPLE
     .\run_isaac_sim.ps1 -Port 8767 -- --no-window
@@ -31,6 +44,7 @@
 [CmdletBinding()]
 param(
     [string] $IsaacSimRoot,
+    [string] $Engine,
     [int]    $Port,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $ExtraArgs
@@ -51,17 +65,62 @@ if (-not $Port) {
     $Port = if ($env:ISAAC_MCP_PORT) { [int] $env:ISAAC_MCP_PORT } else { 8766 }
 }
 
-# Resolve the Isaac Sim install: explicit param, then env var, then local build.
+# Engine name -> launcher shipped in the Isaac Sim install root. Mirrors
+# scripts/lib/isaac_launcher.sh: add one entry to support a new engine.
+$engineLaunchers = @{
+    physx  = 'isaac-sim.bat'
+    newton = 'isaac-sim.newton.bat'
+}
+$defaultEngine = 'physx'
+
+# Selection order (later wins): default, $env:ISAACSIM_ENGINE, -Engine, then
+# --engine <name> / --engine=<name> / --<name> on the command line.
+# NOTE: the working variable must not be named $engine -- PowerShell variable
+# names are case-insensitive, so $engine and the -Engine parameter alias the
+# same storage and the default would silently clobber the parameter's value.
+$selectedEngine = $defaultEngine
+if ($env:ISAACSIM_ENGINE) { $selectedEngine = $env:ISAACSIM_ENGINE }
+if ($Engine)              { $selectedEngine = $Engine }
+
+# $ExtraArgs is $null (not an empty array) when nothing trails the named
+# parameters; guard before indexing so Set-StrictMode does not trip on .Count.
+$passthru = @()
+if ($ExtraArgs) {
+    for ($i = 0; $i -lt $ExtraArgs.Count; $i++) {
+        $arg = $ExtraArgs[$i]
+        if ($arg -eq '--') {
+            continue
+        } elseif ($arg -eq '--engine') {
+            $selectedEngine = $ExtraArgs[$i + 1]; $i++
+        } elseif ($arg -like '--engine=*') {
+            $selectedEngine = $arg.Split('=', 2)[1]
+        } elseif ($arg -like '--*' -and $engineLaunchers.ContainsKey($arg.Substring(2))) {
+            # --physx / --newton are engine selectors; every other flag is Kit's.
+            $selectedEngine = $arg.Substring(2)
+        } else {
+            $passthru += $arg
+        }
+    }
+}
+
+if (-not $engineLaunchers.ContainsKey($selectedEngine)) {
+    throw "Unknown physics engine '$selectedEngine'. Known engines: $($engineLaunchers.Keys -join ', ')"
+}
+$launcherName = $engineLaunchers[$selectedEngine]
+
+# Resolve the Isaac Sim install: explicit param, env var, local source build,
+# the default Windows installer location, then the user home install.
 $candidates = @()
-if ($IsaacSimRoot)          { $candidates += $IsaacSimRoot }
-if ($env:ISAACSIM_ROOT)     { $candidates += $env:ISAACSIM_ROOT }
+if ($IsaacSimRoot)      { $candidates += $IsaacSimRoot }
+if ($env:ISAACSIM_ROOT) { $candidates += $env:ISAACSIM_ROOT }
 $candidates += (Join-Path $repoRoot '..\IsaacSim\_build\windows-x86_64\release')
+$candidates += 'C:\isaacsim'
 $candidates += (Join-Path $env:USERPROFILE 'isaacsim')
 
 $launcher = $null
 foreach ($candidate in $candidates) {
     if (-not $candidate) { continue }
-    $resolved = Join-Path $candidate 'isaac-sim.bat'
+    $resolved = Join-Path $candidate $launcherName
     if (Test-Path -LiteralPath $resolved) {
         $launcher = (Resolve-Path -LiteralPath $resolved).Path
         break
@@ -69,10 +128,13 @@ foreach ($candidate in $candidates) {
 }
 
 if (-not $launcher) {
+    $hint = if ($selectedEngine -ne 'physx') {
+        "`nThe '$selectedEngine' engine ships with Isaac Sim 6.0 and later; this install may be older."
+    } else { '' }
     throw @"
-Isaac Sim launcher (isaac-sim.bat) not found. Checked:
+Isaac Sim launcher ($launcherName) not found. Checked:
 $($candidates -join "`n")
-
+$hint
 Set ISAACSIM_ROOT to your Isaac Sim directory, or pass -IsaacSimRoot.
 "@
 }
@@ -100,10 +162,11 @@ if (-not $env:USD_WORKING_DIR) {
 }
 New-Item -ItemType Directory -Path $env:USD_WORKING_DIR -Force | Out-Null
 
-Write-Host "Repo root:  $repoRoot"
-Write-Host "Isaac Sim:  $launcher"
-Write-Host "Extension:  $extensionId"
-Write-Host "MCP port:   $Port (localhost only)"
+Write-Host "Repo root:   $repoRoot"
+Write-Host "Isaac Sim:   $launcher"
+Write-Host "Engine:      $selectedEngine"
+Write-Host "Extension:   $extensionId"
+Write-Host "MCP port:    $Port (localhost only)"
 Write-Host "USD workdir: $env:USD_WORKING_DIR"
 Write-Host ''
 
@@ -113,8 +176,8 @@ $argList = @(
     "--/exts/isaac.sim.mcp/server.port=$Port"
     '--/exts/isaac.sim.mcp/server.host=localhost'
 )
-if ($ExtraArgs) {
-    $argList += ($ExtraArgs | Where-Object { $_ -ne '--' })
+if ($passthru) {
+    $argList += $passthru
 }
 
 & $launcher @argList
