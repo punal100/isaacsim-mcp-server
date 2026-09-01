@@ -303,7 +303,7 @@ On Windows, wrap the PowerShell launcher:
 
 Go to **Settings > Tools > AI Assistant > MCP Servers** and add the server, with
 the command `/path/to/isaacsim-mcp-server/scripts/run_mcp_server.sh`. See the
-[JetBrains MCP docs](https://www.jetbrains.com/help/idea/model-context-protocol.html) for details.
+[JetBrains MCP docs](https://www.jetbrains.com/help/ai-assistant/configure-an-mcp-server.html) for details.
 
 On Windows, set the command to `powershell` and the arguments to
 `-NoProfile -ExecutionPolicy Bypass -File C:\path\to\isaacsim-mcp-server\scripts\run_mcp_server.ps1`.
