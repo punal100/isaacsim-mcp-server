@@ -52,11 +52,16 @@ if (Test-Path -LiteralPath $installedCli) {
 }
 
 # Fall back to running from source. `-m isaac_mcp.server` resolves the package
-# from the current directory, so run from the repo root.
+# from the working directory, so run from the repo root. Push/Pop keeps that
+# change scoped -- PowerShell has no exec to hand the process off like the .sh,
+# so a bare Set-Location would leave the launcher's own location mutated. Use
+# the call operator (not Start-Process) so the server keeps the parent's stdio.
 if ((Test-Path -LiteralPath $pythonBin) -and (Test-Path -LiteralPath $serverModule)) {
-    Set-Location -LiteralPath $repoRoot
+    Push-Location -LiteralPath $repoRoot
     & $pythonBin -m isaac_mcp.server @forward
-    exit $LASTEXITCODE
+    $code = $LASTEXITCODE
+    Pop-Location
+    exit $code
 }
 
 [Console]::Error.WriteLine('Error: isaacsim-mcp-server not found.')
