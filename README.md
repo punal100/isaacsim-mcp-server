@@ -52,10 +52,11 @@ cd isaacsim-mcp-server
 | NVIDIA Isaac Sim | `5.1.0` - `6.0.1` (PhysX or Newton) |
 | Python | `3.10+` |
 | `uv` | latest (for source install) |
-| Platform | Linux (Ubuntu 22.04+) |
+| Platform | Linux (Ubuntu 22.04+) or Windows 10/11 |
 
 > [!IMPORTANT]
-> Currently only **Linux** is supported. Windows support is planned.
+> **Linux** and **Windows** are supported. On Windows, use the PowerShell
+> launcher `scripts/run_isaac_sim.ps1` in place of the `.sh` scripts (see below).
 > macOS is not supported because NVIDIA Isaac Sim does not run on macOS.
 
 > [!NOTE]
@@ -103,6 +104,20 @@ The same flags work with `scripts/launch_isaac_sim_mcp.sh`. Everything else on
 the command line is forwarded to Kit untouched. The server auto-detects the
 active engine, so no MCP-side configuration changes. Newton requires 6.0 or
 newer; asking for it on 5.1.0 fails with a clear message.
+
+**On Windows**, use the PowerShell launcher instead. It takes the same engine
+selection and forwards extra arguments to Kit:
+
+```powershell
+.\scripts\run_isaac_sim.ps1                          # PhysX (default)
+.\scripts\run_isaac_sim.ps1 -Engine newton           # Newton
+$env:ISAACSIM_ENGINE = 'newton'; .\scripts\run_isaac_sim.ps1
+```
+
+The script resolves the install from `-IsaacSimRoot`, then `$env:ISAACSIM_ROOT`,
+then a local source build, then `C:\isaacsim`, then `%USERPROFILE%\isaacsim`. It
+also creates a writable USD working directory (`.cache\usd`) since Windows has no
+`/tmp`.
 
 <details>
 <summary>Optional: Beaver3D / NVIDIA API keys for 3D generation</summary>
@@ -421,7 +436,8 @@ The inspector is available at `http://localhost:5173`.
 | Script | Purpose | Default |
 |--------|---------|---------|
 | `setup_python_env.sh` | Create venv and install package | Python 3.10 |
-| `run_isaac_sim.sh` | Launch Isaac Sim with extension | `$HOME/isaacsim` |
+| `run_isaac_sim.sh` | Launch Isaac Sim with extension (Linux) | `$HOME/isaacsim` |
+| `run_isaac_sim.ps1` | Launch Isaac Sim with extension (Windows) | `C:\isaacsim` |
 | `run_mcp_server.sh` | Start the MCP server | Port 8766 |
 | `launch_isaac_sim_mcp.sh` | Combined launcher | Auto-assigns port |
 | `dev_mcp_server.sh` | Dev server with hot-reload | Port 8766 |
