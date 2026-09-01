@@ -66,7 +66,8 @@ Before tagging, bump these by hand:
 - **`isaac_mcp/__init__.py`** (`__version__`) — the PyPI wheel version. `pyproject.toml` is `dynamic = ["version"]` and reads it.
 - **`CHANGELOG.md`** — cut `[Unreleased]` into `[X.Y.Z] - <date>`.
 - **`isaac.sim.mcp_extension/config/extension.toml`** (`version`) — when the extension itself changed this cycle. It is a separate artifact (not on PyPI) and has historically lagged the package; keep it in step when the shipped extension differs.
-- **`server.json`** (`.version` **and** `.packages[0].version`) — keep the committed manifest matching the released version. `release.yml` re-stamps it from the tag on the runner, so a missed bump does not *break* the deploy (verified: 0.6.1 shipped to PyPI and the registry while the repo still read 0.6.0) — but that is a safety net, not a licence to leave the source wrong. The committed file must state the released version.
+
+**After the release publishes, bump `server.json` in the repo** (`.version` **and** `.packages[0].version`) to the just-released version and commit — required, not cosmetic. The MCP Registry is only one consumer, and `release.yml` stamps *its* copy from the tag; but other MCP clients and catalogs discover this server by reading `server.json` **directly from the repository**, so a stale committed file hands them the wrong version even while the registry entry is correct. Do it *after* the deploy (not before the tag) so the committed manifest never names a version that is not yet on PyPI — but do not skip it.
 
 Leave these alone — nothing to change:
 
