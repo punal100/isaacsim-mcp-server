@@ -1,6 +1,6 @@
 name: "\U0001F680 Feature Request"
 description: Submit a proposal or request for a new feature
-labels: ["Feature request"]
+labels: ["enhancement"]
 body:
   - type: textarea
     id: feature-request
